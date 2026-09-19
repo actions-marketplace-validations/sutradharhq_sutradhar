@@ -8,6 +8,15 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**The front page shows without-then-with, in plain words.**
+
+- The README's demo section now runs the contrast explicitly: the app's own
+  suite green (`5 passed, 1 skipped`), then the harness (`7 of 7 planted
+  defects caught`), then the seven defects described without any doctrine
+  vocabulary. `examples/README.md` gains a plain-words table above the
+  walkthrough. Both quoted outputs were run and witnessed before being
+  written down; the demo script itself is untouched.
+
 **The plugin's two skills work in an installed plugin** (round 21, R21-17).
 
 - `robustness-loop` and `ops-drill` told Claude to read

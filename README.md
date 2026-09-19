@@ -18,21 +18,58 @@ workflow itself. Most rules in it carry the real defect, on a real
 production-bound codebase, that paid for them; the few that do not are
 labelled practice. None of it is aspiration.
 
-## See it catch something first
+## Without the harness, then with it
+
+This repo ships a small app that stands in for what an AI agent hands you at
+the end of a session. Without the harness, you do what everyone does - run
+its tests:
+
+```
+$ python -m pytest tests/
+5 passed, 1 skipped
+```
+
+Green. The agent says it's done. This is the moment you ship.
+
+Now the same code, with the harness. One command:
+
+```
+$ bash examples/run-the-guards.sh
+...
+7 of 7 planted defects caught.
+```
 
 ![Seven real defects surfacing from a green test suite](docs/media/demo.gif)
+
+Ten seconds, no install beyond `pytest` (the demo's one requirement; it
+tells you if it's missing). Here is what was sitting behind that green run,
+in plain words:
+
+1. An outage gets recorded as "this device reported nothing" - and billed
+   that way.
+2. A query that is instant in the demo and takes the database down after a
+   year of real data.
+3. A line of SQL that becomes an injection hole the moment anyone changes
+   the caller.
+4. A customer summary whose numbers the model made up. It reads perfectly.
+5. The one test that checks the billing arithmetic has never actually run.
+   Anywhere. The suite still counts it and reports green.
+6. The design doc promises 200,000 devices inside 800ms. Nothing holds the
+   code to it.
+7. A test that keeps passing after you delete the feature it tests.
+
+Same code both times. The tests weren't lying - they passed. They just
+weren't saying what "green" is usually taken to mean. Reading the code
+doesn't find these either; every one is a planted copy of a defect that
+shipped on a real production codebase and was found the hard way.
 
 ```bash
 git clone https://github.com/sutradharhq/sutradhar.git
 cd sutradhar && bash examples/run-the-guards.sh
 ```
 
-Ten seconds, no install beyond `pytest` (the demo's one requirement; it
-tells you if it's missing). A small app whose test suite is green, and seven
-real defects surfacing out of it: an outage swallowed into an empty dict, a
-model inventing the numbers in a customer summary, a billing test that has
-never run in any environment, a test that cannot fail. Then read on for why
-each one is in there.
+The defect-by-defect walkthrough, with what each one cost the first time,
+is in [examples/README.md](examples/README.md).
 
 ## Put it in your agent's loop
 
