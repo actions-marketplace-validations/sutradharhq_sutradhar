@@ -74,7 +74,7 @@ Each guard reads fixed paths inside the throwaway dir:
 | detectors | `.py` anywhere, scored by BOTH finders - keep twins clean of the sibling detector | none | none |
 | claim_check | text is all non-`.json` files joined | `witnessed.json` `[{value, unit}]`, required | none |
 | envgate | CI file at `.github/workflows/*.yml` | `gates.json` `[{marker, env_var}]`, required | none |
-| golden | `data.json` (the computed values) | `golden.json` (frozen baseline), required | none |
+| golden | `data.json` (the computed values) | `golden.json` (frozen baseline), required | `rebaseline`: replays an intentional re-baseline with UPDATE on - the reason comes from a `reason.txt` helper, or from nowhere (refused). Without the option both update variables are scrubbed. |
 | budget | any layout; the note's id unquoted, a test file quoting it | none | none |
 | obsgate | `metrics.txt` + `floor.json` | none | none |
 | rounds | `rounds/` records | `design/` notes iff `designs` | `designs` |

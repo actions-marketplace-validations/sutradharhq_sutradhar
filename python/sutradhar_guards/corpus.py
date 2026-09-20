@@ -555,6 +555,7 @@ import sys
 
 _GUARD = {guard_file}
 _TMP = {tmp_dir}
+_OPTIONS = {options_json}
 
 def _load():
     spec = importlib.util.spec_from_file_location("corpus_guard", _GUARD)
@@ -583,7 +584,8 @@ def _runner(source_body: str, tmp: Path, guard_home: Path, module: str,
             options: tuple, fixture: str | None) -> str:
     guard_file = json.dumps(str(guard_home / f"{module}.py"))
     head = _RUNNER_HEAD.format(guard_file=guard_file,
-                               tmp_dir=json.dumps(str(tmp)))
+                               tmp_dir=json.dumps(str(tmp)),
+                               options_json=json.dumps(sorted(options)))
     indented = "\n".join(("    " + line) if line.strip() else line
                          for line in source_body.splitlines())
     return head.replace("{BODY}", indented)
@@ -644,11 +646,22 @@ return bool(missing)
 
 
 def _run_golden(tmp: Path, guard_home: Path, options: tuple,
-                fixture: str | None) -> str:
+                   fixture: str | None) -> str:
     return _runner("""\
 import pathlib
+# options=rebaseline replays an intentional re-baseline: the UPDATE mode
+# is on, and the reason comes from the manifest (reason.txt) or from
+# nowhere - an unreasoned re-baseline is how a golden file stops meaning
+# anything, and the gate refuses it. Without the option both variables
+# are scrubbed so ambient CI config cannot flip a case.
 for key in ("GOLDEN_UPDATE", "GOLDEN_REASON"):
     os.environ.pop(key, None)
+if "rebaseline" in _OPTIONS:
+    os.environ["GOLDEN_UPDATE"] = "1"
+    reason_path = pathlib.Path(_TMP) / "reason.txt"
+    if reason_path.is_file():
+        os.environ["GOLDEN_REASON"] = reason_path.read_text(
+            encoding="utf-8").strip()
 data_path = pathlib.Path(_TMP) / "data.json"
 golden_path = pathlib.Path(_TMP) / "golden.json"
 if not data_path.is_file() or not golden_path.is_file():
@@ -738,7 +751,8 @@ GUARDS: dict[str, _Spec] = {
     "detectors": _Spec("detectors", "runner", _run_detectors, (1,), (0,)),
     "claim_check": _Spec("claim_check", "runner", _run_claim_check, (1,), (0,)),
     "envgate": _Spec("envgate", "runner", _run_envgate, (1,), (0,)),
-    "golden": _Spec("golden", "runner", _run_golden, (1,), (0,)),
+    "golden": _Spec("golden", "runner", _run_golden, (1,), (0,),
+                    frozenset({"rebaseline"})),
     "budget": _Spec("budget", "cli", _argv_budget, (1,), (0,)),
     "obsgate": _Spec("obsgate", "cli", _argv_obsgate, (1,), (0,)),
     "rounds": _Spec("rounds", "cli", _argv_rounds, (1,), (0,),
