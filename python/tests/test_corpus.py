@@ -254,3 +254,28 @@ def test_load_refuses_a_case_id_that_is_not_the_filename(tmp_path):
         encoding="utf-8")
     with pytest.raises(CorpusError, match="does not match the filename"):
         load_cases(tmp_path)
+
+
+def test_every_registered_guard_builds_a_runnable_shape(tmp_path):
+    """Mutation: changing a builder's arity (or a registry entry's kind)
+    without updating its callers breaks every runner adapter at sweep
+    time, long after the suite went green. This pins the contract:
+    CLI builders return an argv starting at an existing guard file,
+    runner builders return a script that parses."""
+    import ast
+
+    guards_home = Path(corpus.__file__).resolve().parent
+    for name, spec in sorted(corpus.GUARDS.items()):
+        if spec.kind == "cli":
+            argv = spec.build(tmp_path, ())
+            assert argv[1].endswith(f"{spec.module}.py")
+            assert Path(argv[1]).is_file(), f"{name}: {argv[1]} is not a file"
+            continue
+        if spec.two_commit:
+            with pytest.raises(corpus.CorpusError):
+                spec.build(tmp_path, guards_home, (), None)
+            script = spec.build(tmp_path, guards_home, (), "two_commit")
+        else:
+            script = spec.build(tmp_path, guards_home, (), None)
+        ast.parse(script)
+        assert spec.module in script, f"{name}: runner never names its guard"

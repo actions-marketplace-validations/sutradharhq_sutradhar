@@ -472,7 +472,12 @@ def materialize(case: Case, dest: Path, twin: str) -> Path:
 class _Spec:
     module: str
     kind: str  # "cli" | "runner"
-    build: object  # (tmp, options) -> argv  |  (tmp, guard_home, options) -> script
+    build: object  # cli: (tmp, options) -> argv
+    # runner: (tmp, guard_home, options, fixture) -> script source.
+    # The fixture tells the adapter whether this twin is its case: a
+    # two-commit twin under any other guard would read as a finding
+    # (any script that exits 0 "verifies" vacuously), so the verify
+    # adapter refuses non-fixture twins instead of scoring them.
     catch_codes: tuple
     clean_codes: tuple
     options: frozenset = frozenset()
@@ -487,6 +492,13 @@ def _argv_swallow(tmp: Path, options: tuple) -> list[str]:
     # No --baseline: a missing baseline file reads as an empty floor, so any
     # swallow is new (exit 1) and a clean twin is silent (exit 0).
     return _py("swallow_lint") + [str(tmp)]
+
+
+def _argv_conflated(tmp: Path, options: tuple) -> list[str]:
+    # Same ratchet shape as swallow_lint: the default baseline beside the
+    # scanned tree is absent in a throwaway dir, which reads as an empty
+    # floor - any conflation is new (exit 1).
+    return _py("conflated_degrade_lint") + [str(tmp)]
 
 
 def _argv_interpolation(tmp: Path, options: tuple) -> list[str]:
@@ -513,6 +525,8 @@ def _argv_rounds(tmp: Path, options: tuple) -> list[str]:
     argv = _py("rounds") + [str(tmp / "rounds"), "--check"]
     if "designs" in options:
         argv += ["--designs", str(tmp / "design")]
+    if "backflow" in options:
+        argv += ["--backflow", str(tmp / "backflow.md")]
     return argv
 
 
@@ -545,11 +559,14 @@ _TMP = {tmp_dir}
 def _load():
     spec = importlib.util.spec_from_file_location("corpus_guard", _GUARD)
     mod = importlib.util.module_from_spec(spec)
+    # Registered before exec: dataclasses resolves string annotations
+    # through the module namespace, and an unregistered module has none.
+    sys.modules["corpus_guard"] = mod
     spec.loader.exec_module(mod)
     return mod
 
 def _body(mod):
-{BODY}
+{{BODY}}
 
 try:
     _guard = _load()
@@ -562,7 +579,8 @@ raise SystemExit(1 if _flagged else 0)
 """
 
 
-def _runner(source_body: str, tmp: Path, guard_home: Path, module: str) -> str:
+def _runner(source_body: str, tmp: Path, guard_home: Path, module: str,
+            options: tuple, fixture: str | None) -> str:
     guard_file = json.dumps(str(guard_home / f"{module}.py"))
     head = _RUNNER_HEAD.format(guard_file=guard_file,
                                tmp_dir=json.dumps(str(tmp)))
@@ -571,7 +589,8 @@ def _runner(source_body: str, tmp: Path, guard_home: Path, module: str) -> str:
     return head.replace("{BODY}", indented)
 
 
-def _run_detectors(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_detectors(tmp: Path, guard_home: Path, options: tuple,
+                   fixture: str | None) -> str:
     return _runner("""\
 import pathlib
 hits = []
@@ -583,10 +602,11 @@ print("detectors: {} violation(s)".format(len(hits)))
 for hit in hits[:10]:
     print("  {}".format(hit.message if hasattr(hit, "message") else hit))
 return bool(hits)
-""", tmp, guard_home, "detectors")
+""", tmp, guard_home, "detectors", options, fixture)
 
 
-def _run_claim_check(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_claim_check(tmp: Path, guard_home: Path, options: tuple,
+                     fixture: str | None) -> str:
     return _runner("""\
 import pathlib
 texts = []
@@ -602,10 +622,11 @@ witnessed = json.loads(wit_path.read_text(encoding="utf-8"))
 ungrounded = _guard.ground_claims("\\n".join(texts), witnessed)
 print("claim_check: {} ungrounded claim(s)".format(len(ungrounded)))
 return bool(ungrounded)
-""", tmp, guard_home, "claim_check")
+""", tmp, guard_home, "claim_check", options, fixture)
 
 
-def _run_envgate(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_envgate(tmp: Path, guard_home: Path, options: tuple,
+                 fixture: str | None) -> str:
     return _runner("""\
 import pathlib
 gates_path = pathlib.Path(_TMP) / "gates.json"
@@ -619,10 +640,11 @@ missing = _guard.audit_skip_gates(
     gates, [".github/workflows/*.yml"], root=_TMP)
 print("envgate: {} gate(s) set by nothing: {}".format(len(missing), missing))
 return bool(missing)
-""", tmp, guard_home, "envgate")
+""", tmp, guard_home, "envgate", options, fixture)
 
 
-def _run_golden(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_golden(tmp: Path, guard_home: Path, options: tuple,
+                fixture: str | None) -> str:
     return _runner("""\
 import pathlib
 for key in ("GOLDEN_UPDATE", "GOLDEN_REASON"):
@@ -641,10 +663,11 @@ except _guard.GoldenError as exc:
     return True
 print("golden: computed data within the frozen tolerance")
 return False
-""", tmp, guard_home, "golden")
+""", tmp, guard_home, "golden", options, fixture)
 
 
-def _run_dead_route(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_dead_route(tmp: Path, guard_home: Path, options: tuple,
+                    fixture: str | None) -> str:
     return _runner("""\
 import pathlib
 routes_path = pathlib.Path(_TMP) / "routes.json"
@@ -658,10 +681,15 @@ weak = _guard.find_unfailable_assertions(_TMP)
 print("dead_route: {} dead route(s), {} unfailable assertion(s)".format(
     len(dead), len(weak)))
 return bool(dead or weak)
-""", tmp, guard_home, "dead_route_lint")
+""", tmp, guard_home, "dead_route_lint", options, fixture)
 
 
-def _run_verify(tmp: Path, guard_home: Path, options: tuple) -> str:
+def _run_verify(tmp: Path, guard_home: Path, options: tuple,
+                   fixture: str | None) -> str:
+    if fixture != "two_commit":
+        raise CorpusError(
+            "verify_guard scores two-commit fixtures only - a plain "
+            "twin is not its case")
     return _runner("""\
 import pathlib
 import shlex
@@ -697,11 +725,13 @@ cmd = shlex.join([sys.executable, guard_rel])
 res = _guard.verify(pathlib.Path(_TMP), "HEAD", guard_cmd=cmd)
 print("verify: {} ({})".format(res.verdict, res.reason))
 raise SystemExit(res.exit_code)
-""", tmp, guard_home, "verify_guard")
+""", tmp, guard_home, "verify_guard", options, fixture)
 
 
 GUARDS: dict[str, _Spec] = {
     "swallow_lint": _Spec("swallow_lint", "cli", _argv_swallow, (1,), (0,)),
+    "conflated_degrade_lint": _Spec("conflated_degrade_lint", "cli",
+                                    _argv_conflated, (1,), (0,)),
     "interpolation_lint": _Spec("interpolation_lint", "cli",
                                 _argv_interpolation, (1,), (0,),
                                 frozenset({"strict"})),
@@ -712,7 +742,7 @@ GUARDS: dict[str, _Spec] = {
     "budget": _Spec("budget", "cli", _argv_budget, (1,), (0,)),
     "obsgate": _Spec("obsgate", "cli", _argv_obsgate, (1,), (0,)),
     "rounds": _Spec("rounds", "cli", _argv_rounds, (1,), (0,),
-                    frozenset({"designs"})),
+                    frozenset({"designs", "backflow"})),
     "framework_shape": _Spec("framework_shape", "cli", _argv_framework_shape,
                              (1,), (0,)),
     "framework_only": _Spec("framework_only", "cli", _argv_framework_only,
@@ -726,6 +756,7 @@ GUARDS: dict[str, _Spec] = {
 
 
 def run_twin(spec: _Spec, tmp: Path, options: tuple,
+             fixture: str | None = None,
              timeout: int = _TWIN_TIMEOUT_S) -> int:
     """Run one twin, returning the guard's exit code.
 
@@ -736,7 +767,14 @@ def run_twin(spec: _Spec, tmp: Path, options: tuple,
         argv = spec.build(tmp, options)
         cwd = tmp
     else:
-        script = spec.build(tmp, GUARD_HOME, options)
+        try:
+            script = spec.build(tmp, GUARD_HOME, options, fixture)
+        except CorpusError as exc:
+            # Not this adapter's case (a verify twin without a fixture can
+            # only arrive via --sweep, which loads no fixture): exit 3 reads
+            # INVALID in scoring and silent in a sweep, both honestly.
+            print(f"[corpus] twin refused: {exc}")
+            return 3
         runner_dir = tmp.parent / "runner"
         runner_dir.mkdir(parents=True, exist_ok=True)
         script_path = runner_dir / f"run_{spec.module}.py"
@@ -864,10 +902,15 @@ def coverage(cases: list[Case], rule_ids: set[str], exclusions: dict[str, str],
              floor: dict[str, str]) -> dict:
     """Partition every doctrine rule into covered / excluded / uncovered.
 
+    Only `expected: caught` cases cover: an open case names a gap no guard
+    holds yet, and counting it as covered would read the gap as closed.
     Raises CoverageError when a rule is uncovered but absent from the floor
-    (write the sentence or write the case), or when a floor entry now has a
-    case or an exclusion (remove it so the floor drops). Cases citing `-`
-    guard repo-specific promises and contribute to no rule's coverage.
+    (write the sentence or write the case), when a floor entry now has a
+    case or an exclusion (remove it so the floor drops), when an exclusion
+    names a rule with a case (remove it - the rule is held), or when either
+    file names a rule the doctrine does not have (a stale row that can no
+    longer mean what it says). Cases citing `-` guard repo-specific
+    promises and contribute to no rule's coverage.
     """
     cited = {c.rule for c in cases if c.rule != "-"}
     unknown = cited - rule_ids
@@ -875,8 +918,28 @@ def coverage(cases: list[Case], rule_ids: set[str], exclusions: dict[str, str],
         raise CoverageError(
             f"case(s) cite rule(s) not in the doctrine: {sorted(unknown)}"
         )
-    covered = {r for r in cited if r in rule_ids}
+    unknown_excluded = sorted(r for r in exclusions if r not in rule_ids)
+    if unknown_excluded:
+        raise CoverageError(
+            f"exclusion(s) name rule(s) not in the doctrine: "
+            f"{', '.join(unknown_excluded)}"
+        )
+    unknown_banked = sorted(r for r in floor if r not in rule_ids)
+    if unknown_banked:
+        raise CoverageError(
+            f"floor entr(ies) name rule(s) not in the doctrine: "
+            f"{', '.join(unknown_banked)}"
+        )
+    covered = {c.rule for c in cases
+               if c.rule != "-" and c.expected == "caught"}
     excluded = {r for r in exclusions if r in rule_ids}
+    held_but_excluded = sorted(r for r in excluded if r in covered)
+    if held_but_excluded:
+        raise CoverageError(
+            f"excluded rule(s) now have a case holding them: "
+            f"{', '.join(held_but_excluded)}. Remove the exclusion - an "
+            f"exclusion for a covered rule hides the coverage."
+        )
     uncovered = set(rule_ids) - covered - excluded
     missing = sorted(r for r in uncovered if r not in floor)
     if missing:
@@ -1110,8 +1173,8 @@ def _selfcheck_body() -> bool:
                 twin = Path(twin_td)
                 materialize(case, twin / "d", "defective")
                 materialize(case, twin / "c", "clean")
-                d_rc = run_twin(spec, twin / "d", case.options)
-                c_rc = run_twin(spec, twin / "c", case.options)
+                d_rc = run_twin(spec, twin / "d", case.options, None)
+                c_rc = run_twin(spec, twin / "c", case.options, None)
             verdicts[cid] = score(case, d_rc, c_rc, spec)
         for cid, want in (("selfcheck-must-catch", CAUGHT),
                           ("selfcheck-must-miss", MISSED),
@@ -1263,8 +1326,8 @@ def _score_case(case: Case) -> tuple[str, int, int]:
         except CorpusError as exc:
             print(f"[corpus] INVALID {case.id}: {exc}")
             return INVALID, _RC_SPAWN_FAILED, _RC_SPAWN_FAILED
-        d_rc = run_twin(spec, twin / "defective", case.options)
-        c_rc = run_twin(spec, twin / "clean", case.options)
+        d_rc = run_twin(spec, twin / "defective", case.options, case.fixture)
+        c_rc = run_twin(spec, twin / "clean", case.options, case.fixture)
     return score(case, d_rc, c_rc, spec), d_rc, c_rc
 
 
@@ -1287,7 +1350,16 @@ def _run_one(cases: list[Case], case_id: str, as_json: bool) -> int:
 def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
     """One guard over EVERY clean twin in the corpus - that is what catches
     a guard that flags everything, and it is cross-case so it cannot live
-    in per-case scoring (D7)."""
+    in per-case scoring (D7).
+
+    Exit mapping differs from scoring on purpose: a sweep asks only "did
+    it flag this twin". Exit 2 (nothing here it could read) and 3
+    (inconclusive) are silence - most twins are not this guard's cases.
+    Timeouts, spawn failures, and signals are infrastructure breaking, not
+    silence, and stay INVALID: a hung guard must not read as a quiet one.
+    (Case scoring keeps the strict partition: there, a 2/3 means the case
+    meant to exercise the guard and the guard could not run.)
+    """
     if guard_name not in GUARDS:
         print(f"[corpus] unknown guard {guard_name!r} - known: "
               f"{sorted(GUARDS)}")
@@ -1303,10 +1375,12 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
             except CorpusError as exc:
                 unmeasurable.append(f"{case.id} ({exc})")
                 continue
-            rc = run_twin(spec, twin, case.options)
+            rc = run_twin(spec, twin, case.options, case.fixture)
             if rc in spec.catch_codes:
                 flagged.append(case.id)
-            elif rc not in spec.clean_codes:
+            elif rc in spec.clean_codes or rc in (2, 3):
+                continue
+            else:
                 unmeasurable.append(f"{case.id} (exit {rc})")
     for cid in flagged:
         print(f"[corpus] SWEEP-FLAGGED {cid} ({guard_name} flagged its "

@@ -99,7 +99,8 @@ twin in the corpus - that is what catches a guard that flags everything.
 
 ## Coverage
 
-Every doctrine rule is covered (a case cites it), excluded (`EXCLUSIONS.md`,
+Every doctrine rule is covered (a `caught`-expected case cites it - an
+open case names a gap, never coverage), excluded (`EXCLUSIONS.md`,
 `- <rule>: <one-line reason>` - drills and human-only rules), or banked in
 `uncovered.json` (`{rule: why-not-yet}`). A rule uncovered and unbanked
 fails; a banked rule that gained a case fails until removed. Banking is an
