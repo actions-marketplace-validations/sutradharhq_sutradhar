@@ -13,7 +13,8 @@ earned it and the usage pattern.
   claim_check          ground every number in generated text (AI/LLM surfaces)
   golden               golden-dataset gate with declared tolerance + reasoned re-baseline
   detectors            ready-made ratchet detectors (imports, unbounded ORDER BY)
-  obsgate              observability floor as a provenance gate (doctrine 6.6)
+   obsgate              observability floor as a provenance gate (doctrine 6.6)
+   corpus               defect-corpus scorer: twin verdicts, coverage floor (CLI)
   dead_route_lint      tests that cannot fail: weak assertions + dead routes
   conflated_degrade_lint  a failed read that reads as an empty one (2.7's quiet half)
   ci_step_lint         every CI step can reach the script it names (6.7)
