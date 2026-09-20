@@ -369,6 +369,7 @@ else
 fi
 copy "$HERE/agent/skills/robustness-loop.md" "$SKILLS_DIR/robustness-loop/SKILL.md"
 copy "$HERE/agent/skills/ops-drill.md"       "$SKILLS_DIR/ops-drill/SKILL.md"
+copy "$HERE/agent/skills/improvement-round.md" "$SKILLS_DIR/improvement-round/SKILL.md"
 # The condensed forms, for the rules files that will not take 15KB.
 copy "$HERE/agent/packs/README.md"           "$TARGET/agent-packs/README.md"
 copy "$HERE/agent/packs/CLAUDE-snippet.md"   "$TARGET/agent-packs/CLAUDE-snippet.md"

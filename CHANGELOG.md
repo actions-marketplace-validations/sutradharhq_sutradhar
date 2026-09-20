@@ -8,6 +8,22 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**The defect corpus scores what the guards claim** (round 22, R22-1, R22-2).
+
+- New `python/sutradhar_guards/corpus.py`: 53 defective/clean twin manifests
+  in `corpus/cases/` scored through the real guard invocations - 50 of 50
+  caught-cases CAUGHT, 3 open, denominator from the manifest set on disk,
+  per-rule coverage floor (11 covered, 11 excluded, 26 banked) that fails
+  on an uncovered rule with no sentence. A manifest names a guard, never a
+  command; the fixed registry owns all 15 invocation shapes.
+- New `agent/skills/improvement-round.md` (+ plugin wrapper, bootstrap
+  copy, CI step): the Monday skill reads the stop rule first, authors the
+  case before the guard, and accepts only on the four-command gate's
+  `0 / 0 / 0 / 0`. Selection composed, not built; merges stay human.
+- `corpus.py` does not join the bootstrap copy set in v1: a tool that only
+  ever exits 2 in a tree with no cases would teach adopters that a red
+  gate is normal.
+
 **The front page shows without-then-with, in plain words.**
 
 - The README's demo section now runs the contrast explicitly: the app's own

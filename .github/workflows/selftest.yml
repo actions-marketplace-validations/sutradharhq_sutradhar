@@ -83,6 +83,12 @@ jobs:
         # A mistyped rule id silently loses the attribution 8.1
         # depends on, and nothing else would ever notice.
         run: python python/sutradhar_guards/rounds.py docs/rounds/ --check
+      - name: Defect corpus scores what the guards claim (denominator held)
+        # R22-1: the demo's "7 of 7" was a loop counter, so deleting a block
+        # yielded "6 of 6" and exit 0. The corpus takes its denominator from
+        # the manifest set on disk; this step runs the full scorer with the
+        # archive flags so scars and rule ids resolve, not just parse.
+        run: python python/sutradhar_guards/corpus.py corpus/ --rounds docs/rounds/ --backflow docs/backflow.md
       - name: verify-guard selfcheck (a decorative guard must be caught)
         # Builds real repos with a real guard and a deliberately decorative
         # one and requires the tool to tell them apart. A verifier that

@@ -219,8 +219,10 @@ sutradhar/
 │   │   ├── framework_only.py      Keeps this repo a framework: stdlib-only, zero deps
 │   │   ├── framework_shape.py     ...and keeps it speaking its own vocabulary, not an adopter's
 │   │   ├── ownership_lint.py      Refuses a stage that touches a path another agent owns (7.3)
-│   │   └── mcp_server.py          Optional MCP stdio server: the guards as agent-callable tools
+│   │   ├── mcp_server.py          Optional MCP stdio server: the guards as agent-callable tools
+│   │   └── corpus.py              Scorer for the defect corpus: twin verdicts, coverage floor, selection gate
 │   └── tests/                     The guards' own tests, red cases and selfcheck wiring included
+├── corpus/                    Defective/clean twin manifests, the per-rule coverage floor, the corpus README
 ├── js/
 │   ├── cypress/
 │   │   ├── uiGuards.ts            Behavioral UI invariants: effect assertions, overprint detection
@@ -243,7 +245,8 @@ sutradhar/
 │   ├── packs/               The same rules condensed: a CLAUDE.md snippet and a Cursor rules file
 │   └── skills/
 │       ├── robustness-loop.md     A repeatable adversarial depth sweep
-│       └── ops-drill.md           Operate the system, don't read it
+│       ├── ops-drill.md           Operate the system, don't read it
+│       └── improvement-round.md   One mechanized step of the self-improving loop: case, guard, gate
 ├── plugin/                  Claude Code plugin: the guards as session hooks, not as advice
 │   ├── hooks/hooks.json           PreToolUse gates `git commit`; Stop checks the guard on HEAD
 │   ├── scripts/                   The two hooks, stdlib only - and they never block when THEY fail

@@ -65,6 +65,7 @@ BUNDLED = (
 SKILLS = (
     "ops-drill.md",
     "robustness-loop.md",
+    "improvement-round.md",
 )
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
