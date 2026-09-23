@@ -8,6 +8,24 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**`ci_step_lint.py` refuses a pipe that swallows an exit code** (round 23,
+R22-3 closed, doctrine 6.3).
+
+- A `run:` step that pipes a command into another (`pytest | tail -5`)
+  with no `set -o pipefail` before it now exits 1. GitHub runs a step with
+  no `shell:` key as `bash -e {0}`, which has no pipefail, so the step
+  reports the last command's status and a failed build reads as success.
+  Accepted: pipefail set earlier in the step, or an effective shell (step,
+  job defaults, workflow defaults, in any key order) of plain `bash`, which
+  GitHub runs with `-o pipefail`. Not read as pipes: `||`, a `|` inside
+  quotes, `${{ }}` or a comment, an `echo`/`printf` upstream, and any step
+  whose shell is not a command shell. The embedded selfcheck carries the
+  new pair: a piped build must be flagged and the same pipe under pipefail
+  must not.
+- The corpus case `ci-pipe-swallows-exit-code` is flipped from open to
+  caught with its twins unchanged, and 6.3 leaves `corpus/uncovered.json`:
+  13 rules covered, 25 banked.
+
 **The defect corpus scores what the guards claim** (round 22, R22-1, R22-2).
 
 - New `python/sutradhar_guards/corpus.py`: 53 defective/clean twin manifests

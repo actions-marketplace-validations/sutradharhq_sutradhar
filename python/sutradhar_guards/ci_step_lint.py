@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # Copyright 2026 Varun Mundra. Licensed under the Apache License, Version 2.0.
 # Part of Sutradhar: https://github.com/sutradharhq/sutradhar
-"""Guard: every CI step that runs a script must be able to find it.
+"""Guard: every CI step that runs a script must be able to find it, and no
+step may pipe its exit code away.
 
 This is doctrine 6.7 - *an exit code is not a witness* - applied to CI
 wiring. A step whose interpreter exits 2 on file-not-found has made a claim
@@ -40,6 +41,35 @@ What is deliberately NOT flagged, because a guard that cries wolf is muted:
   * **a bare ``foo.py``** with no directory separator, which is ambiguous.
   * anything not ending in ``.py``.
 
+The second invariant: a pipe must not swallow an exit code (6.3)
+------------------------------------------------------------------
+A ``run:`` step's status is its shell's status, and without ``pipefail`` a
+pipeline's status is its LAST command's. ``pytest | tail -5`` exits with
+tail's 0 whatever pytest said, so a failed build reads as success. GitHub
+runs a step with no ``shell:`` key as ``bash -e {0}`` - ``-e`` without
+``pipefail`` - so the default is the swallowing one.
+
+*Scar (6.3): ``| tail`` reported a failed production build as success during
+a drill. No guard checked a workflow for it; the rule was convention-only
+(R22-3).*
+
+A pipe is flagged unless one of these holds, each checked, none guessed:
+
+  * ``set -o pipefail`` (or a ``set -...o pipefail`` cluster) runs earlier
+    in the same step;
+  * the effective shell - the step's ``shell:``, else the job's
+    ``defaults.run.shell``, else the workflow's - is plain ``bash`` (which
+    GitHub expands to ``bash --noprofile --norc -eo pipefail {0}``) or names
+    ``pipefail`` itself;
+  * every command upstream of the last ``|`` is ``echo`` or ``printf``,
+    which have no build status to lose (``echo x | tee -a "$GITHUB_STEP_SUMMARY"``
+    is a report, not a swallowed check).
+
+``||`` is not a pipe, and ``|`` inside quotes, ``${{ }}`` expressions, or a
+comment is not read as one. A step whose shell is not a command shell
+(``python``, ``node``, a custom interpreter) is not read for pipes at all:
+``|`` there is an operator, not a pipeline.
+
 Do not point this at a workflow TEMPLATE. ``ci/guards.yml`` in this
 repository names ``scripts/swallow_lint.py``, which resolves in the tree
 ``bootstrap.sh`` builds and not in this one; running the guard over a
@@ -51,7 +81,8 @@ Usage:
     python ci_step_lint.py path/to/one.yml
     python ci_step_lint.py --selfcheck
 
-Exit 0 reachable, 1 a step cannot find its script, 2 the check could not run
+Exit 0 reachable and no swallowing pipe, 1 a step cannot find its script or
+pipes away its exit code, 2 the check could not run
 (no argument, an unknown flag, a directory with no workflows in it). 2 is not
 a pass: "could not measure" and "did not fail" are different answers (2.9).
 
@@ -123,13 +154,139 @@ def steps(text: str):
         yield i, step_wd or job_wd.get(cur_job) or ".", "\n".join(body)
 
 
+# ── 6.3: a pipe that swallows the exit code ─────────────────────────────────
+
+#: A single `|` - not `||`. `|&` is a pipe too (stderr rides along).
+_PIPE_RX = re.compile(r"(?<!\|)\|(?!\|)")
+#: `set -o pipefail`, `set -eo pipefail`, `set -euo pipefail`, ...
+_PIPEFAIL_ON_RX = re.compile(r"\bset\s+-[A-Za-z]*o\s+pipefail\b")
+_PIPEFAIL_OFF_RX = re.compile(r"\bset\s+\+[A-Za-z]*o\s+pipefail\b")
+#: A block-scalar indicator on the `run:` line itself (`|`, `>-`, `|+`, `|2`).
+_BLOCK_RX = re.compile(r"^[|>][+-]?\d*[+-]?$")
+#: Shells whose `|` is a pipeline. Anything else (`python {0}`, a custom
+#: interpreter) is not read for pipes: there `|` is an operator.
+_COMMAND_SHELLS = {"bash", "sh", "zsh", "pwsh", "powershell", "cmd"}
+#: Upstream commands with no build status to lose.
+_HARMLESS_UPSTREAM = {"echo", "printf"}
+
+
+def _code_only(line: str) -> str:
+    """The line with expressions, quoted strings, and a comment removed, so
+    a `|` inside any of them is not read as a pipe."""
+    s = re.sub(r"\$\{\{.*?\}\}", " ", line)
+    s = re.sub(r"'[^']*'", "''", s)
+    s = re.sub(r'"(?:[^"\\]|\\.)*"', '""', s)
+    return re.sub(r"(^|\s)#.*$", r"\1", s)
+
+
+def _key_value(line: str, key: str) -> "str | None":
+    m = re.match(rf"^\s*(?:-\s+)?{key}:\s*(.+?)\s*$", line)
+    return m.group(1).strip("'\"") if m else None
+
+
+def _effective_shell(lines: list, run_idx: int) -> "str | None":
+    """The shell a `run:` step at ``lines[run_idx]`` executes under: the
+    step's own `shell:` (in any key order within the step), else the job's
+    `defaults.run.shell`, else the workflow's. None when nothing names one,
+    which on GitHub means `bash -e {0}` - no pipefail."""
+    run_line = lines[run_idx]
+    key_indent = len(run_line) - len(run_line.lstrip())
+    start = dash = None
+    m = re.match(r"^(\s*)-\s+", run_line)
+    if m:
+        start, dash = run_idx, len(m.group(1))
+    else:
+        for j in range(run_idx - 1, -1, -1):
+            mm = re.match(r"^(\s*)-\s+", lines[j])
+            if mm and len(mm.group(1)) < key_indent:
+                start, dash = j, len(mm.group(1))
+                break
+    if start is not None:
+        step_keys = dash + 2
+        for j in range(start, len(lines)):
+            ln = lines[j]
+            ind = len(ln) - len(ln.lstrip())
+            if j > start and ln.strip() and ind <= dash:
+                break
+            if j == start or ind == step_keys:
+                v = _key_value(ln, "shell")
+                if v:
+                    return v
+        # The job: the nearest job header above, read up to its `steps:`.
+        for j in range(start, -1, -1):
+            if re.match(r"^  [\w-]+:\s*$", lines[j]):
+                for k in range(j + 1, start):
+                    if re.match(r"^\s+steps:\s*$", lines[k]):
+                        break
+                    v = _key_value(lines[k], "shell")
+                    if v:
+                        return v
+                break
+    # The workflow: a `defaults.run.shell` before `jobs:`.
+    for ln in lines:
+        if re.match(r"^jobs:\s*$", ln):
+            break
+        v = _key_value(ln, "shell")
+        if v and ln.startswith(" "):
+            return v
+    return None
+
+
+def _shell_sets_pipefail(shell: "str | None") -> bool:
+    if shell is None:
+        return False
+    # GitHub's template for a bare `bash` is `bash --noprofile --norc -eo
+    # pipefail {0}`; `bash {0}` or `sh` get no such thing.
+    return shell.strip() == "bash" or "pipefail" in shell
+
+
+def swallowing_pipes(text: str) -> list:
+    """``[(line_no, line)]`` for every pipe in a `run:` step that replaces
+    the step's exit code with its last command's."""
+    lines = text.splitlines()
+    found: list = []
+    for line_no, _wd, body in steps(text):
+        shell = _effective_shell(lines, line_no - 1)
+        if shell is not None and shell.split()[0] not in _COMMAND_SHELLS:
+            continue
+        if _shell_sets_pipefail(shell):
+            continue
+        armed = False
+        for k, raw in enumerate(body.split("\n")):
+            if k == 0 and _BLOCK_RX.match(raw.strip()):
+                continue
+            code = _code_only(raw)
+            if _PIPEFAIL_OFF_RX.search(code):
+                armed = False
+            if _PIPEFAIL_ON_RX.search(code):
+                armed = True
+            if armed:
+                continue
+            segments = _PIPE_RX.split(code)
+            if len(segments) < 2:
+                continue
+            upstream = [s.split()[0] if s.split() else "" for s in segments[:-1]]
+            if all(w in _HARMLESS_UPSTREAM for w in upstream):
+                continue
+            found.append((line_no + k, raw.strip()))
+    return found
+
+
 def audit(path: Path, repo_root: Path) -> tuple:
     """(problems, scripts checked, absolute paths skipped) for one workflow."""
     problems: list = []
     checked = 0
     skipped_absolute = 0
-    for line_no, wd, body in steps(path.read_text(encoding="utf-8",
-                                                  errors="replace")):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for line_no, line in swallowing_pipes(text):
+        problems.append(
+            f"{path.name}:{line_no}: `{line}` pipes a command's exit code "
+            f"away - the step reports the LAST command's status, so a failed "
+            f"build or test reads as success (6.3). Add `set -o pipefail` "
+            f"before it, or give the step `shell: bash` (GitHub runs that "
+            f"with -o pipefail)."
+        )
+    for line_no, wd, body in steps(text):
         base = repo_root if wd == "." else (repo_root / wd)
         for ref in _SCRIPT_RX.findall(body):
             if ref.startswith("/"):
@@ -201,6 +358,31 @@ jobs:
 """
 
 
+_PIPE_BAD = """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+"""
+
+_PIPE_PIPEFAIL = """
+jobs:
+  a:
+    steps:
+      - run: |
+          set -o pipefail
+          python3 scripts/reachable.py | tail -5
+"""
+
+_PIPE_SHELL_BASH = """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+        shell: bash
+"""
+
+
 def selfcheck() -> bool:
     """Known-good and known-bad for every claim, because an exit code is
     evidence only in pairs (6.7)."""
@@ -219,6 +401,9 @@ def selfcheck() -> bool:
             ("a step-level working-directory that moves the path", _STEP_LEVEL,
              True),
             ("an absolute path an earlier step creates", _ABSOLUTE, False),
+            ("a build piped through tail with no pipefail", _PIPE_BAD, True),
+            ("the same pipe after `set -o pipefail`", _PIPE_PIPEFAIL, False),
+            ("the same pipe under `shell: bash`", _PIPE_SHELL_BASH, False),
         ):
             wf.write_text(body)
             found, checked, skipped = audit(wf, root)
@@ -266,7 +451,9 @@ def selfcheck() -> bool:
             "[ci-step-lint] selfcheck ok: unreachable script rejected, "
             "`working-directory: .` accepted, step-level working-directory "
             "applied, absolute path skipped and counted, job defaults read, "
-            "`- run:` inline form read as a step"
+            "`- run:` inline form read as a step, a pipe that swallows the "
+            "exit code rejected, the same pipe accepted under pipefail and "
+            "under `shell: bash`"
         )
     return not problems
 

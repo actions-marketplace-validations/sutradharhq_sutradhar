@@ -19,7 +19,6 @@
   "5.1": "loop queue: derived value carrying its strongest input tier; silent edit of a published number",
   "6.10": "loop queue: metric scoped to less than the artifact delivered",
   "6.11": "open case exit-1-traceback-as-verdict, adapter-level, no registry guard measures the caller mapping",
-  "6.3": "open case ci-pipe-swallows-exit-code, no guard checks pipes yet",
   "6.8": "loop queue: handler whose error branch blames the subject for its own crash",
   "6.9": "loop queue: verdict whose word contradicts its number",
   "7.2": "loop queue: documented control existing only in docstrings",

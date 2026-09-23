@@ -296,3 +296,235 @@ def test_the_ci_template_is_not_treated_as_this_repos_workflow():
         f"the adopter's tree. Every step naming one of these would exit "
         f"non-zero on file-not-found on their first push."
     )
+
+
+
+# ── 6.3: a pipe that swallows the exit code (R22-3) ─────────────────────────
+#
+# Without pipefail a pipeline's status is its LAST command's, and GitHub runs
+# a step with no `shell:` key as `bash -e {0}` - no pipefail. `pytest | tail`
+# exits with tail's 0 whatever pytest said. Every test here goes through
+# audit() or main(), the seam CI and the corpus both call.
+
+def _pipe_problems(tmp_path: Path, workflow: str) -> list:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    root = _repo(tmp_path, workflow)
+    problems, _, _ = csl.audit(root / ".github" / "workflows" / "ci.yml", root)
+    return [p for p in problems if "(6.3)" in p]
+
+
+PIPED = """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+"""
+
+
+def test_a_build_piped_through_tail_without_pipefail_is_flagged(tmp_path):
+    """Mutation: in swallowing_pipes(), `if len(segments) < 2:` changed to
+    `< 99` (a scanner blind to every pipe) turns this red."""
+    problems = _pipe_problems(tmp_path, PIPED)
+    assert len(problems) == 1, problems
+    assert "ci.yml:5:" in problems[0]
+    assert "tail -5" in problems[0]
+
+
+def test_the_cli_exits_one_on_a_swallowing_pipe(tmp_path, capsys):
+    """Through the CLI, the seam CI calls. Mutation: `if len(segments) < 2:`
+    changed to `< 99` turns this red - and the embedded selfcheck with it."""
+    assert csl.main([str(_repo(tmp_path, PIPED))]) == 1
+    assert "pipes a command's exit code away" in capsys.readouterr().err
+
+
+def test_a_pipe_inside_a_block_is_reported_at_its_own_line(tmp_path):
+    """The scar's shape is a line inside a block, and the finding must name
+    that line, not the `run:` key. Mutation: `if len(segments) < 2:` changed
+    to `< 99` turns this red."""
+    problems = _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - name: tests
+        run: |
+          echo start
+          python3 -m pytest tests/ -q 2>&1 | tee pytest.log
+""")
+    assert len(problems) == 1, problems
+    assert "ci.yml:8:" in problems[0]
+
+
+def test_set_pipefail_before_the_pipe_makes_it_clean(tmp_path):
+    """Mutation: `if armed: continue` changed to `if False: continue` (pipefail
+    ignored) turns this red."""
+    for i, opener in enumerate(
+        ("set -o pipefail", "set -euo pipefail", "set -eo pipefail")
+    ):
+        assert _pipe_problems(tmp_path / str(i), f"""
+jobs:
+  a:
+    steps:
+      - run: |
+          {opener}
+          python3 scripts/reachable.py | tail -5
+""") == [], opener
+
+
+def test_pipefail_set_after_the_pipe_does_not_cover_it(tmp_path):
+    """Pipefail arms the lines after it, not the whole step. Mutation:
+    `armed = False` changed to `armed = bool(_PIPEFAIL_ON_RX.search(body))`
+    (a whole-body search) turns this red."""
+    assert len(_pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: |
+          python3 scripts/reachable.py | tail -5
+          set -o pipefail
+""")) == 1
+
+
+def test_shell_bash_on_the_step_is_clean_in_either_key_order(tmp_path):
+    """GitHub expands a bare `shell: bash` to `bash --noprofile --norc -eo
+    pipefail {0}`. YAML key order is free, so `shell:` after `run:` must
+    count as much as before it. Mutation: the step-key scan `range(start,
+    len(lines))` cut to `range(start, run_idx)` (keys before `run:` only)
+    turns this red."""
+    before = """
+jobs:
+  a:
+    steps:
+      - name: before
+        shell: bash
+        run: python3 scripts/reachable.py | tail -5
+"""
+    after = """
+jobs:
+  a:
+    steps:
+      - name: after
+        run: python3 scripts/reachable.py | tail -5
+        shell: bash
+"""
+    assert _pipe_problems(tmp_path / "b", before) == []
+    assert _pipe_problems(tmp_path / "a", after) == []
+
+
+def test_a_job_default_shell_bash_covers_its_steps(tmp_path):
+    """Mutation: the job-header match in _effective_shell changed to
+    `if False:` (job defaults never read) turns this red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+""") == []
+
+
+def test_a_workflow_default_shell_bash_covers_every_job(tmp_path):
+    """Mutation: `if v and ln.startswith(" "):` in the workflow-defaults scan
+    changed to `if False:` turns this red."""
+    assert _pipe_problems(tmp_path, """
+defaults:
+  run:
+    shell: bash
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+""") == []
+
+
+def test_one_steps_shell_does_not_cover_the_next_step(tmp_path):
+    """A shell read from the wrong step would pass the next one on its
+    neighbour's setting. Mutation: the step-end test `if j > start and
+    ln.strip() and ind <= dash:` changed to `if False:` (the scan runs on
+    into the next step) turns this red."""
+    assert len(_pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+      - run: python3 scripts/reachable.py | tail -5
+        shell: bash
+""")) == 1
+
+
+def test_shell_sh_is_still_flagged(tmp_path):
+    """`sh -e {0}` gets no pipefail; only bash's template carries it.
+    Mutation: `shell.strip() == "bash"` widened to `in ("bash", "sh")` turns
+    this red."""
+    assert len(_pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tail -5
+        shell: sh
+""")) == 1
+
+
+# The refusals: a guard that flagged these would be muted inside a week.
+
+def test_logical_or_quoted_bars_and_expressions_are_not_pipes(tmp_path):
+    """Mutation: _code_only() returning the raw line (quotes, expressions and
+    comments read as code) turns this red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: |
+          python3 scripts/reachable.py || exit 1
+          grep -E "alpha|beta" notes.txt
+          grep -E 'alpha|beta' notes.txt
+          echo "${{ github.event.inputs.x || 'none' }}"
+          python3 scripts/reachable.py  # never `| tail` here
+""") == []
+
+
+def test_an_echo_into_tee_is_a_report_not_a_swallowed_check(tmp_path):
+    """Mutation: `if all(w in _HARMLESS_UPSTREAM ...):` changed to
+    `if False:` turns this red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: echo "done" | tee -a "$GITHUB_STEP_SUMMARY"
+""") == []
+
+
+def test_a_python_shell_is_not_read_for_pipes(tmp_path):
+    """Under `shell: python` a `|` is bitwise-or, not a pipeline.
+    Mutation: the non-command-shell skip changed to `if False:` turns this
+    red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - shell: python
+        run: print(1 | 2)
+""") == []
+
+
+def test_the_block_indicator_is_not_read_as_a_pipe(tmp_path):
+    """`run: |` opens a block; it is not a pipeline with an empty upstream.
+    Mutation: the `k == 0 and _BLOCK_RX.match(...)` skip changed to
+    `if False:` turns this red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: |
+          python3 scripts/reachable.py
+""") == []
+
+
+def test_the_selfcheck_names_the_pipe_claims(capsys):
+    """6.7: the pipe half must be exercised by the embedded selfcheck, or a
+    blinded pipe scanner still reports `selfcheck ok`. Mutation: `if
+    len(segments) < 2:` changed to `< 99` turns this red."""
+    assert csl.selfcheck()
+    out = capsys.readouterr().out
+    assert "pipe that swallows the exit code rejected" in out, out
