@@ -497,7 +497,7 @@ jobs:
 
 def test_a_python_shell_is_not_read_for_pipes(tmp_path):
     """Under `shell: python` a `|` is bitwise-or, not a pipeline.
-    Mutation: the non-command-shell skip changed to `if False:` turns this
+    Mutation: the non-POSIX-shell skip changed to `if False:` turns this
     red."""
     assert _pipe_problems(tmp_path, """
 jobs:
@@ -528,3 +528,98 @@ def test_the_selfcheck_names_the_pipe_claims(capsys):
     assert csl.selfcheck()
     out = capsys.readouterr().out
     assert "pipe that swallows the exit code rejected" in out, out
+
+
+# ── R23-10: a windows job's default shell is pwsh, not bash ─────────────────
+#
+# ci_step_lint ships to every adopter. A step with no `shell:` in a job on a
+# windows runner runs under pwsh, and the remedy this guard prints - `set -o
+# pipefail` - is a bash command that breaks it. The pair below is the claim:
+# the SAME pipe is flagged on linux and left alone on windows.
+
+def _job(runs_on: str) -> str:
+    return f"""
+jobs:
+  a:
+    runs-on: {runs_on}
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+"""
+
+
+def test_a_pipe_in_a_linux_job_with_no_shell_key_is_flagged(tmp_path):
+    """The known-bad half of the pair. Mutation: `if shell is None and
+    _job_runs_on_windows(...)` changed to `if shell is None:` (every
+    unshelled step skipped as if windows) turns this red."""
+    assert len(_pipe_problems(tmp_path, _job("ubuntu-latest"))) == 1
+
+
+def test_the_same_pipe_in_a_windows_job_is_not_flagged(tmp_path):
+    """The known-good half. Mutation: `return "windows" in named.lower()`
+    changed to `return False` (runs-on never read) turns this red."""
+    assert _pipe_problems(tmp_path, _job("windows-latest")) == []
+
+
+def test_a_windows_runner_named_in_a_label_list_is_read(tmp_path):
+    """Self-hosted runners name the OS in a label list, flow or block form.
+    Mutation: `return "windows" in named.lower()` changed to `return False`
+    turns this red."""
+    assert _pipe_problems(tmp_path / "flow",
+                          _job("[self-hosted, Windows, x64]")) == []
+    assert _pipe_problems(tmp_path / "block", """
+jobs:
+  a:
+    runs-on:
+      - self-hosted
+      - windows
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+""") == []
+
+
+def test_runs_on_after_steps_is_still_read(tmp_path):
+    """Job keys are unordered. Mutation: the job-key scan ending at `steps:`
+    instead of at the next job header turns this red."""
+    assert _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+    runs-on: windows-latest
+""") == []
+
+
+def test_a_matrix_expression_names_nothing_and_is_read_as_bash(tmp_path):
+    """`${{ matrix.os }}` could be anything; the linux leg still swallows.
+    Mutation: the expression strip in _job_runs_on_windows removed, with a
+    matrix os expression that spells windows, turns this red."""
+    assert len(_pipe_problems(tmp_path, _job("${{ matrix.windows_or_linux }}"))) == 1
+
+
+def test_one_jobs_runner_does_not_leak_into_the_next_job(tmp_path):
+    """Mutation: the next-job-header stop `^ {0,2}\\S` removed turns this
+    red (the linux job reads the windows job's runs-on below it)."""
+    assert len(_pipe_problems(tmp_path, """
+jobs:
+  linux:
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+  win:
+    runs-on: windows-latest
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+""")) == 1
+
+
+def test_an_explicit_pwsh_or_cmd_shell_is_not_read_for_pipes(tmp_path):
+    """`set -o pipefail` is not a remedy there. Mutation: `_POSIX_SHELLS`
+    lookup replaced by the old set including pwsh and cmd turns this red."""
+    for i, shell in enumerate(("pwsh", "powershell", "cmd")):
+        assert _pipe_problems(tmp_path / str(i), f"""
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+        shell: {shell}
+""") == [], shell

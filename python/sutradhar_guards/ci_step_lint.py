@@ -66,9 +66,13 @@ A pipe is flagged unless one of these holds, each checked, none guessed:
     is a report, not a swallowed check).
 
 ``||`` is not a pipe, and ``|`` inside quotes, ``${{ }}`` expressions, or a
-comment is not read as one. A step whose shell is not a command shell
-(``python``, ``node``, a custom interpreter) is not read for pipes at all:
-``|`` there is an operator, not a pipeline.
+comment is not read as one. Only POSIX shells (bash, sh, zsh) are read for
+pipes at all. pwsh, powershell and cmd have a different exit-code model and
+the remedy printed here (``set -o pipefail``) is a bash command that breaks
+them; ``python`` or a custom interpreter reads ``|`` as an operator. A step
+with no ``shell:`` anywhere, in a job whose ``runs-on`` names windows, runs
+under pwsh by GitHub's default and is skipped (R23-10). A ``runs-on`` that
+is an expression (``${{ matrix.os }}``) names nothing and is read as bash.
 
 Do not point this at a workflow TEMPLATE. ``ci/guards.yml`` in this
 repository names ``scripts/swallow_lint.py``, which resolves in the tree
@@ -163,9 +167,11 @@ _PIPEFAIL_ON_RX = re.compile(r"\bset\s+-[A-Za-z]*o\s+pipefail\b")
 _PIPEFAIL_OFF_RX = re.compile(r"\bset\s+\+[A-Za-z]*o\s+pipefail\b")
 #: A block-scalar indicator on the `run:` line itself (`|`, `>-`, `|+`, `|2`).
 _BLOCK_RX = re.compile(r"^[|>][+-]?\d*[+-]?$")
-#: Shells whose `|` is a pipeline. Anything else (`python {0}`, a custom
-#: interpreter) is not read for pipes: there `|` is an operator.
-_COMMAND_SHELLS = {"bash", "sh", "zsh", "pwsh", "powershell", "cmd"}
+#: POSIX shells, the only ones whose pipe status `set -o pipefail` governs.
+#: pwsh, powershell and cmd have pipelines too, but a different exit-code
+#: model, and the remedy this guard prints is a bash command that breaks
+#: them (R23-10). `python {0}` and custom interpreters: `|` is an operator.
+_POSIX_SHELLS = {"bash", "sh", "zsh"}
 #: Upstream commands with no build status to lose.
 _HARMLESS_UPSTREAM = {"echo", "printf"}
 
@@ -232,6 +238,34 @@ def _effective_shell(lines: list, run_idx: int) -> "str | None":
     return None
 
 
+def _job_runs_on_windows(lines: list, run_idx: int) -> bool:
+    """True when the job holding ``lines[run_idx]`` names windows in its
+    `runs-on` (scalar, flow list, or block list). GitHub's default shell
+    there is pwsh, not bash. An expression (`${{ matrix.os }}`) names
+    nothing and reads False: the linux leg of a matrix still swallows."""
+    for j in range(run_idx, -1, -1):
+        if re.match(r"^  [\w-]+:\s*$", lines[j]):
+            # A job key sits at indent 4 and may follow `steps:` (key order
+            # is free); the next job header, at indent 2, ends the job.
+            for k in range(j + 1, len(lines)):
+                ln = lines[k]
+                if re.match(r"^ {0,2}\S", ln):
+                    return False
+                m = re.match(r"^    runs-on:\s*(.*)$", ln)
+                if not m:
+                    continue
+                value = [m.group(1)]
+                for nxt in lines[k + 1:]:
+                    if nxt.strip() and len(nxt) - len(nxt.lstrip()) <= 4:
+                        break
+                    value.append(nxt)
+                named = re.sub(r"\$\{\{.*?\}\}", " ", "\n".join(value))
+                named = re.sub(r"(^|\s)#[^\n]*", " ", named, flags=re.M)
+                return "windows" in named.lower()
+            return False
+    return False
+
+
 def _shell_sets_pipefail(shell: "str | None") -> bool:
     if shell is None:
         return False
@@ -247,7 +281,9 @@ def swallowing_pipes(text: str) -> list:
     found: list = []
     for line_no, _wd, body in steps(text):
         shell = _effective_shell(lines, line_no - 1)
-        if shell is not None and shell.split()[0] not in _COMMAND_SHELLS:
+        if shell is None and _job_runs_on_windows(lines, line_no - 1):
+            continue  # the runner's default is pwsh (R23-10)
+        if shell is not None and shell.split()[0] not in _POSIX_SHELLS:
             continue
         if _shell_sets_pipefail(shell):
             continue
@@ -383,6 +419,23 @@ jobs:
 """
 
 
+_PIPE_LINUX_JOB = """
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+"""
+
+_PIPE_WINDOWS_JOB = """
+jobs:
+  a:
+    runs-on: windows-latest
+    steps:
+      - run: python3 scripts/reachable.py | tee out.log
+"""
+
+
 def selfcheck() -> bool:
     """Known-good and known-bad for every claim, because an exit code is
     evidence only in pairs (6.7)."""
@@ -404,6 +457,9 @@ def selfcheck() -> bool:
             ("a build piped through tail with no pipefail", _PIPE_BAD, True),
             ("the same pipe after `set -o pipefail`", _PIPE_PIPEFAIL, False),
             ("the same pipe under `shell: bash`", _PIPE_SHELL_BASH, False),
+            ("a pipe in a linux job with no shell key", _PIPE_LINUX_JOB, True),
+            ("the same pipe in a windows job, pwsh by default",
+             _PIPE_WINDOWS_JOB, False),
         ):
             wf.write_text(body)
             found, checked, skipped = audit(wf, root)
@@ -453,7 +509,8 @@ def selfcheck() -> bool:
             "applied, absolute path skipped and counted, job defaults read, "
             "`- run:` inline form read as a step, a pipe that swallows the "
             "exit code rejected, the same pipe accepted under pipefail and "
-            "under `shell: bash`"
+            "under `shell: bash`, a linux job's pipe rejected and the same "
+            "pipe in a windows job (pwsh by default) accepted"
         )
     return not problems
 

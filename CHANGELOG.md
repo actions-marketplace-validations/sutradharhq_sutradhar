@@ -22,6 +22,13 @@ R22-3 closed, doctrine 6.3).
   whose shell is not a command shell. The embedded selfcheck carries the
   new pair: a piped build must be flagged and the same pipe under pipefail
   must not.
+- Only POSIX shells (bash, sh, zsh) are read for pipes (R23-10). pwsh,
+  powershell and cmd were read too, and a step with no `shell:` on a
+  windows runner was read as bash, so an ordinary pwsh pipeline was
+  flagged with a `set -o pipefail` remedy that breaks pwsh. A job whose
+  `runs-on` names windows is now read as pwsh by default and skipped. New
+  corpus case `ci-pipe-windows-default-shell` pins the pair: the linux job
+  is caught, and the windows job is a clean twin every sweep runs.
 - The corpus case `ci-pipe-swallows-exit-code` is flipped from open to
   caught with its twins unchanged, and 6.3 leaves `corpus/uncovered.json`:
   13 rules covered, 25 banked.
