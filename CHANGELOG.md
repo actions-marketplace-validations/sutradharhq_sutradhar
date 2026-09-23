@@ -29,6 +29,11 @@ R22-3 closed, doctrine 6.3).
   `runs-on` names windows is now read as pwsh by default and skipped. New
   corpus case `ci-pipe-windows-default-shell` pins the pair: the linux job
   is caught, and the windows job is a clean twin every sweep runs.
+- `corpus.py --sweep` counts what it measured (R23-3). Every sweep prints
+  measured-silent, not-applicable, flagged and invalid counts, and `--json`
+  carries them; a sweep that measured zero twins exits 2 instead of 0.
+  Not-applicable twins (exit 2 or 3 from a guard that has nothing to read
+  there) stay a real answer, not a failure. The selfcheck carries the pair.
 - The corpus case `ci-pipe-swallows-exit-code` is flipped from open to
   caught with its twins unchanged, and 6.3 leaves `corpus/uncovered.json`:
   13 rules covered, 25 banked.

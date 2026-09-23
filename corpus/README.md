@@ -96,6 +96,9 @@ python3 python/sutradhar_guards/corpus.py corpus/ --sweep <guard>
 `--case` scores one twin pair (MISSED before its guard exists is the
 proposer loop's starting gun). `--sweep` runs one guard over every clean
 twin in the corpus - that is what catches a guard that flags everything.
+It prints how many twins it measured silent, found not applicable (the
+guard exited 2 or 3), flagged, and could not run; a sweep that measured
+zero twins exits 2, because reading nothing is not a pass.
 
 ## Coverage
 

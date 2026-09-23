@@ -1230,12 +1230,31 @@ def _selfcheck_body() -> bool:
                 f"refusal above could be refusing everything: {said!r}"
             )
 
+        # The sweep pair (R23-3): a guard that reads the one clean twin and
+        # passes it sweeps 0; a guard that can read none of them (no
+        # workflow in a python twin) sweeps 2, never 0.
+        archive = ["--doctrine", str(doctrine), "--rounds", str(syn_rounds)]
+        rc, said = run([str(one), "--sweep", "swallow_lint"] + archive)
+        if rc != 0 or "1 measured-silent" not in said:
+            problems.append(
+                f"a sweep that measured one silent twin exited {rc}, not 0 "
+                f"with its count: {said!r}"
+            )
+        rc, said = run([str(one), "--sweep", "ci_step_lint"] + archive)
+        if rc != 2 or "measured ZERO" not in said:
+            problems.append(
+                f"a sweep that could read no twin exited {rc}, not 2 - "
+                f"silence it never measured read as a pass: {said!r}"
+            )
+
     for problem in problems:
         print(f"[corpus] SELFCHECK FAILED: {problem}")
     if not problems:
         print("[corpus] selfcheck ok: synthetic CAUGHT/MISSED/FALSE_POSITIVE "
               "cases scored their verdicts, a malformed manifest refused, an "
-              "empty corpus refused with exit 2, a minimal valid corpus passed")
+              "empty corpus refused with exit 2, a minimal valid corpus passed, "
+              "a sweep that measured a twin passed and one that measured none "
+              "exited 2")
     return not problems
 
 
@@ -1373,6 +1392,13 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
     silence, and stay INVALID: a hung guard must not read as a quiet one.
     (Case scoring keeps the strict partition: there, a 2/3 means the case
     meant to exercise the guard and the guard could not run.)
+
+    Silence is counted, not assumed (R23-3, 2.9). Every twin lands in one
+    of four counts, printed on every run: measured-silent (the guard read
+    it and passed it), not-applicable (2/3), flagged, invalid. A sweep that
+    measured ZERO twins - nothing silent, nothing flagged - has not passed:
+    it exits 2, because "I read none of them" is not "none of them were
+    flagged".
     """
     if guard_name not in GUARDS:
         print(f"[corpus] unknown guard {guard_name!r} - known: "
@@ -1381,6 +1407,7 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
     spec = GUARDS[guard_name]
     flagged: list[str] = []
     unmeasurable: list[str] = []
+    silent = not_applicable = 0
     with tempfile.TemporaryDirectory(prefix="sutradhar-corpus-") as td:
         for case in cases:
             twin = Path(td) / case.id
@@ -1392,8 +1419,10 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
             rc = run_twin(spec, twin, case.options, case.fixture)
             if rc in spec.catch_codes:
                 flagged.append(case.id)
-            elif rc in spec.clean_codes or rc in (2, 3):
-                continue
+            elif rc in spec.clean_codes:
+                silent += 1
+            elif rc in (2, 3):
+                not_applicable += 1
             else:
                 unmeasurable.append(f"{case.id} (exit {rc})")
     for cid in flagged:
@@ -1401,10 +1430,22 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
               f"clean twin)")
     for item in unmeasurable:
         print(f"[corpus] SWEEP-INVALID {item}")
-    code = 2 if unmeasurable else (1 if flagged else 0)
+    measured = silent + len(flagged)
+    print(f"[corpus] sweep {guard_name}: {len(cases)} clean twin(s) - "
+          f"{silent} measured-silent, {not_applicable} not-applicable, "
+          f"{len(flagged)} flagged, {len(unmeasurable)} invalid")
+    if measured == 0 and not unmeasurable:
+        print(f"[corpus] sweep {guard_name} measured ZERO twins - it read "
+              f"none of them, which is not a pass (2.9)")
+    if unmeasurable or measured == 0:
+        code = 2
+    else:
+        code = 1 if flagged else 0
     if as_json:
         print(json.dumps({"guard": guard_name, "flagged": flagged,
-                          "invalid": unmeasurable, "exit": code},
+                          "invalid": unmeasurable, "exit": code,
+                          "measured_silent": silent,
+                          "not_applicable": not_applicable},
                          sort_keys=True))
     return code
 

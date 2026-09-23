@@ -279,3 +279,74 @@ def test_every_registered_guard_builds_a_runnable_shape(tmp_path):
             script = spec.build(tmp_path, guards_home, (), None)
         ast.parse(script)
         assert spec.module in script, f"{name}: runner never names its guard"
+
+
+# ── the sweep counts what it measured (R23-3, 2.9) ──────────────────────────
+
+def _fake_guard(monkeypatch, exit_code: int) -> None:
+    """Register a guard that exits `exit_code` on every twin it is shown."""
+    spec = corpus._Spec(
+        "fake", "cli",
+        lambda tmp, options: [sys.executable, "-c",
+                              f"raise SystemExit({exit_code})"],
+        (1,), (0,),
+    )
+    monkeypatch.setitem(corpus.GUARDS, "fake", spec)
+
+
+def _two_cases(tmp_path):
+    _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
+    _write(tmp_path, "b.md", _manifest("b", defective=SWALLOW, clean=PLAIN))
+
+
+def test_a_sweep_that_could_read_no_twin_exits_two_not_zero(tmp_path,
+                                                             monkeypatch):
+    """A guard that exits 2 on every twin measured nothing, and a sweep that
+    measured nothing has not passed. Mutation: in _run_sweep, `if
+    unmeasurable or measured == 0:` changed to `if unmeasurable:` turns this
+    red twice over - the embedded selfcheck's sweep pair fails (exit 1), and
+    with the selfcheck stubbed out the sweep itself returns 0, silence it
+    never measured read as a pass."""
+    _two_cases(tmp_path)
+    _fake_guard(monkeypatch, 2)
+    code, said = _run([str(tmp_path), "--sweep", "fake", "--json"])
+    assert code == 2, said
+    assert "measured ZERO" in said
+    report = _json_of(said)
+    assert report["measured_silent"] == 0 and report["not_applicable"] == 2
+
+
+def test_a_sweep_that_measured_its_twins_and_flagged_none_exits_zero(
+        tmp_path, monkeypatch):
+    """The pair: the zero-measured refusal must not refuse everything.
+    Mutation: `elif rc in spec.clean_codes: silent += 1` changed to count
+    into not_applicable turns this red (exit 2, silent 0)."""
+    _two_cases(tmp_path)
+    _fake_guard(monkeypatch, 0)
+    code, said = _run([str(tmp_path), "--sweep", "fake", "--json"])
+    assert code == 0, said
+    assert "2 measured-silent, 0 not-applicable" in said
+    assert _json_of(said)["measured_silent"] == 2
+
+
+def test_not_applicable_twins_do_not_fail_a_sweep_that_measured_one(
+        tmp_path, monkeypatch):
+    """Most twins are not a given guard's cases; exit 2 on them is a real
+    answer. One measured twin beside them is enough. Mutation: treating
+    every exit 2 as SWEEP-INVALID exits 2 here."""
+    _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
+    _write(tmp_path, "b.md", _manifest("b", defective=SWALLOW,
+                                       clean="# readable\n"))
+    spec = corpus._Spec(
+        "fake", "cli",
+        lambda tmp, options: [
+            sys.executable, "-c",
+            "import pathlib,sys; "
+            "t=(pathlib.Path('app')/'units.py').read_text(); "
+            "sys.exit(0 if 'readable' in t else 2)"],
+        (1,), (0,),
+    )
+    monkeypatch.setitem(corpus.GUARDS, "fake", spec)
+    code, said = _run([str(tmp_path), "--sweep", "fake", "--json"])
+    assert code == 0, said
+    assert "1 measured-silent, 1 not-applicable, 0 flagged" in said
