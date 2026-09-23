@@ -32,6 +32,15 @@ on purpose for the maintainer to decide.
 | R23-10 | med | 6.7 | the maintainer's review | fixed | ci_step_lint read pwsh, powershell and cmd as pipe shells, and read a step with no shell key on a windows runner as bash, so an ordinary pwsh pipeline was flagged and the adopter was told to add set -o pipefail, a bash command that breaks pwsh. Rule 6.7 because the defect is a missing known-good: the selfcheck carried pairs for pipefail and for shell bash but none on the runner axis, so an exit 1 on a windows job was never tested against a case that must exit 0. Fixed: only bash, sh and zsh are read, and an unshelled step in a job whose runs-on names windows is skipped; the pair is in the tests, the selfcheck, and corpus case ci-pipe-windows-default-shell, whose clean twin the sweep now runs forever. |
 | R23-8 | low | 2.2 | phase 4 | fixed | Amending the round commit after the gate changes its hash, so the commit verify_guard names (abcdd65) is not on the branch. The tree is identical (7f29814 before and after, diff empty), and verify_guard was re-run on the amended HEAD with --expect naming two tests: VERIFIED. The skill said neither. Fixed: phase 4 now requires re-running verify_guard, with --expect, against the amended HEAD. |
 
+## What each register item became
+
+Decided by the maintainer. The round made both items due and, correctly, decided neither (R23-9).
+
+| item | evidence | decision | landed in |
+|---|---|---|---|
+| B-45 | scar | rejected | one instance of domain statistics; no second thread in rounds 22 or 23 |
+| B-46 | scar | adopted | 7.3: clean up by the record of what the run created, never by the names it expects |
+
 ## What the procedure got wrong
 
 Quoted from `corpus/improvement-round.md` unless marked. Each is what the
