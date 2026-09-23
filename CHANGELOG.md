@@ -11,18 +11,29 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 **The defect corpus scores what the guards claim** (round 22, R22-1, R22-2).
 
 - New `python/sutradhar_guards/corpus.py`: 53 defective/clean twin manifests
-  in `corpus/cases/` scored through the real guard invocations - 50 of 50
-  caught-cases CAUGHT, 3 open, denominator from the manifest set on disk,
-  per-rule coverage floor (11 covered, 11 excluded, 26 banked) that fails
-  on an uncovered rule with no sentence. A manifest names a guard, never a
-  command; the fixed registry owns all 15 invocation shapes.
-- New `agent/skills/improvement-round.md` (+ plugin wrapper, bootstrap
-  copy, CI step): the Monday skill reads the stop rule first, authors the
-  case before the guard, and accepts only on the four-command gate's
-  `0 / 0 / 0 / 0`. Selection composed, not built; merges stay human.
-- `corpus.py` does not join the bootstrap copy set in v1: a tool that only
-  ever exits 2 in a tree with no cases would teach adopters that a red
-  gate is normal.
+  in `corpus/cases/`, scored through the real guard invocations - 50 of 50
+  caught-cases CAUGHT, 3 open, 0 invalid, with the denominator taken from
+  the manifest set on disk. Four verdicts, not three: a guard that flags the
+  clean twin is a FALSE_POSITIVE, a finding of its own kind, never folded
+  into "could not measure". A manifest names a guard, never a command; a
+  fixed registry owns all 15 invocation shapes.
+- A per-rule coverage floor: of 49 doctrine rules, 12 covered, 11 excluded
+  with a reason each (drills, restores, anything needing a running system
+  or a human), 26 uncovered and banked in `corpus/uncovered.json`. A rule
+  that is uncovered with no sentence fails, and so does a banked rule that
+  gained a case. The banked list is the improvement loop's work queue.
+- The demo declares its total (R22-1). `run-the-guards.sh` used to count
+  the blocks that ran, so deleting one printed "6 of 6" and exited 0. It now
+  refuses a run whose count differs from `EXPECTED=7`.
+- New `corpus/improvement-round.md`: the Monday round reads the stop
+  rule first, refuses to start while a previous round's branch is
+  unreviewed, authors the case before the guard, and accepts only on the
+  four-command gate's `0 / 0 / 0 / 0`. Selection composed, not built;
+  merges stay human. It runs in this repository only for now.
+- **`corpus.py` and the skill do not ship to adopters yet** (R22-8). A
+  scorer with no cases can only ever refuse, so neither joins the bootstrap
+  copy set or the plugin until the skill can teach an adopter to write
+  cases; they join together.
 
 **The front page shows without-then-with, in plain words.**
 
@@ -31,7 +42,7 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
   defects caught`), then the seven defects described without any doctrine
   vocabulary. `examples/README.md` gains a plain-words table above the
   walkthrough. Both quoted outputs were run and witnessed before being
-  written down; the demo script itself is untouched.
+  written down; that change left the demo script itself untouched.
 
 **The plugin's two skills work in an installed plugin** (round 21, R21-17).
 

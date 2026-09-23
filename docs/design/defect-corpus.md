@@ -26,8 +26,8 @@ before writing any guard.
 
 | Dimension | Design N | Enforced by |
 |---|---|---|
-| corpus cases in one full run | 60 | `test_defect_corpus_holds_its_declared_envelope` |
-| wall clock for that run | 15,000 ms (x2 CI slack) | same |
+| synthetic swallow_lint twin pairs in one scored run | 60 | `test_defect_corpus_holds_its_declared_envelope` |
+| wall clock for that synthetic run | 15,000 ms (x2 CI slack) | same |
 | peak Python heap of the scorer | 64 MB (x2 CI slack) | same |
 
 **Provenance of these numbers** (doctrine 5.1): the ceilings are chosen
@@ -42,9 +42,18 @@ loose because its job is a tripwire for parent-side accumulation - the
 twin outputs must stream through the scorer, never collect in it.
 
 60 is the design N because it is the committed backfill (50+ cases plus
-headroom): the phase-3 waves. If the corpus grows past it, raise the
-number here - deliberately, in a diff someone reviews - and the budget
-test gets harder automatically, because it reads its N from this note.
+headroom). Raise it here - deliberately, in a diff someone reviews - and
+the budget test gets harder automatically, because it reads its N from
+this note.
+
+**What this envelope does not bind** (6.10, R22-9). The budget measures a
+synthetic corpus built from the cheapest guard, not the corpus CI runs.
+The real one mixes every guard, and the slow ones (verify_guard building
+git history, rounds running its own selfcheck) dominate: 53 real cases
+took 24.4 s wall clock on the same laptop on 2026-09-23, against 4.5 s
+for 60 synthetic ones. Nothing but the CI job's ten-minute timeout bounds
+the real run today. That is recorded as a deferred finding rather than
+hidden behind a synthetic number that reads like the real one.
 
 ## Failure story  <!-- doctrine 1.4 -->
 

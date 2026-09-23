@@ -1,9 +1,0 @@
-# File-ownership manifest for the phase-3 parallel backfill (doctrine 7.3).
-# One owner per line: a name, a colon, then the globs that owner owns.
-# Each wave agent owns ONLY its case files. corpus.py, the coverage floor
-# files, the shape baseline, and everything else belong to the maintainer,
-# who merges after the waves land. An agent staging another owner's path
-# is refused by ownership_lint.py.
-wave-a: corpus/cases/swallow-bare-except-pass.md corpus/cases/swallow-continue-in-loop.md corpus/cases/swallow-tuple-handler-empty-list.md corpus/cases/conflated-none-absent.md corpus/cases/conflated-method-qualname.md corpus/cases/sql-bare-limit-strict.md corpus/cases/order-by-fstring-fragment.md corpus/cases/import-from-subpackage-init.md corpus/cases/manifest-requirements-in-surface.md corpus/cases/swallow-nested-function.md
-wave-b: corpus/cases/claim-grouped-thousands.md corpus/cases/claim-units-mismatch.md corpus/cases/golden-tolerance-boundary.md corpus/cases/golden-rebaseline-without-reason.md corpus/cases/budget-rps-unenforced.md corpus/cases/budget-missing-tests-dir.md corpus/cases/envgate-second-gate-unset.md corpus/cases/obsgate-zero-rows.md corpus/cases/obsgate-empty-200.md corpus/cases/obsgate-cardinality-cap.md
-wave-c: corpus/cases/assertion-not-equal-spelling.md corpus/cases/route-with-query-ghost.md corpus/cases/route-nested-prefix.md corpus/cases/ci-step-working-directory.md corpus/cases/ci-step-job-defaults.md corpus/cases/round-duplicate-id.md corpus/cases/round-bad-severity.md corpus/cases/shape-dollar-amount.md corpus/cases/shape-lakh-word.md corpus/cases/shape-sqft-area.md

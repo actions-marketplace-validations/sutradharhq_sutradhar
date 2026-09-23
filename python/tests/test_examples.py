@@ -73,3 +73,30 @@ def test_the_runner_fails_when_a_defect_is_fixed(tmp_path):
     )
     assert proc.returncode == 1, "the runner passed with a planted defect removed"
     assert "MISSED" in proc.stdout
+
+
+def test_the_runner_fails_when_a_check_is_deleted(tmp_path):
+    """R22-1: the total used to be counted from the blocks that ran, so
+    deleting one printed "6 of 6" and exited 0 - and a deleted check is the
+    one edit nobody reviews as a weakening. The runner now declares
+    EXPECTED and refuses a run whose count differs.
+
+    Mutation: restoring the old tail (report `$step` as the total, no
+    EXPECTED comparison) turns this red with exit 0 and "6 of 6"."""
+    sandbox = tmp_path / "sutradhar"
+    shutil.copytree(ROOT, sandbox, ignore=shutil.ignore_patterns(
+        ".git", "__pycache__", "*.pyc", "node_modules"))
+    runner = sandbox / "examples" / "run-the-guards.sh"
+    text = runner.read_text()
+    start = text.index("# 3. query interpolation")
+    end = text.index("# 4. fabricated numbers")
+    runner.write_text(text[:start] + text[end:])
+    proc = subprocess.run(
+        ["bash", str(runner)], capture_output=True, text=True,
+        env={"PATH": __import__("os").environ["PATH"], "PYTHON": sys.executable},
+        cwd=str(sandbox), timeout=300,
+    )
+    assert proc.returncode == 1, (
+        f"the runner passed with a check deleted:\n{proc.stdout}")
+    assert "6 of 7 checks ran" in proc.stdout
+    assert "6 of 6" not in proc.stdout
