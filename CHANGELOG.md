@@ -8,6 +8,48 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**Adoptable in one line: a GitHub Action and pre-commit hooks**
+(distribution; usable from v0.6.0).
+
+- `action.yml`: `uses: sutradharhq/sutradhar@v0.6.0`. A composite action
+  that runs `action/run_guards.py` from its own checkout on the runner's
+  `python3` - no Docker, no npm, no install step. Default guards are the
+  four that need no configuration: `swallow`, `interpolation`,
+  `conflated-degrade` over `paths`, and `ci-step` over `workflows`.
+  `budget` and `rounds` are opt-in by name; `framework_only` and
+  `framework_shape` are refused by name, since in an adopter's tree they
+  can only pass (R20-4). Baselines and the allowlist are inputs, and one
+  that is named must exist.
+- Every input reaches the step through `env:`; no `run:` body holds a
+  `${{ }}` expression (2.8 in YAML), and every guard is started as an
+  argument list, never through a shell. A path input carrying a shell
+  metacharacter or a leading `-` is refused with exit 2 before anything
+  runs: `--update-baseline` as a path would have rewritten the adopter's
+  floor.
+- Exit 2 is never a silent pass (2.9). `on-cannot-run` defaults to `fail`,
+  because a green job over a guard that read nothing is the R21-2 lie one
+  level up; `skip` makes each one a named skip (the guard's own sentence,
+  a warning annotation, a step-summary row), and a run where every guard
+  was skipped fails anyway. A guard whose output carries a traceback, or
+  that exits anything but 0/1/2, is reported as crashed - the instrument's
+  failure, not a finding (6.8, 6.11). Guard output is fenced with
+  `::stop-commands::`, so a line of the adopter's source quoted in a
+  finding cannot speak to the runner.
+- `.pre-commit-hooks.yaml`: `sutradhar-swallow`, `sutradhar-interpolation`,
+  `sutradhar-conflated-degrade`, `sutradhar-ci-step`. `language: script`,
+  because a `python` hook makes pre-commit pip-install the repository and
+  that needs the dependency manifest this framework refuses to ship. The
+  four guard files are now committed executable (mode 100755) for that
+  reason. `conflated-degrade` scans the whole tree rather than the staged
+  files: its ratchet reads a banked entry it did not see as fixed and
+  exits 1.
+- Proof, in pairs: the selftest `action` job runs the action from this
+  checkout over `examples/broken-app` (must fail) and a clean twin under
+  `python/tests/fixtures/action-clean` (must pass), a tree with no Python
+  under `fail` (must fail) and `skip` (must pass), and an injection-shaped
+  path (must be refused, and its command must not have run).
+  `python/tests/test_distribution.py` pins the rest offline.
+
 **`ci_step_lint.py` refuses a pipe that swallows an exit code** (round 23,
 R22-3 closed, doctrine 6.3).
 

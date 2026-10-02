@@ -128,6 +128,71 @@ jobs:
           pip install -q pytest
           bash examples/run-the-guards.sh
 
+  action:
+    name: The GitHub Action fails a planted tree and passes a clean one
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # action.yml exercised from this checkout (`uses: ./`), in pairs (6.7):
+    # each red is only evidence beside a green that differs from it in one
+    # input. A step expected to go red carries continue-on-error, so the
+    # step after it asserts its outcome - without that, an expected red that
+    # went green would read as a passing job. No setup-python: the action
+    # must work on the runner's own python3, as it will for an adopter.
+    steps:
+      - uses: actions/checkout@v4
+      # (a) The planted tree: a silent swallow and an f-string query in
+      # examples/broken-app. Default guards, only `paths` named.
+      - name: Action over the planted tree (must go red)
+        id: planted
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: examples/broken-app/app
+      - name: The planted tree's run failed
+        env:
+          OUTCOME: ${{ steps.planted.outcome }}
+        run: test "$OUTCOME" = failure
+      # (b) Same inputs, the clean twin. If this went red, (a)'s red would
+      # prove only that the action fails.
+      - name: Action over the clean fixture (must pass)
+        uses: ./
+        with:
+          paths: python/tests/fixtures/action-clean
+      # (c) A tree with no Python file, default on-cannot-run (`fail`): an
+      # exit 2 must fail the job, never read as a pass (2.9).
+      - name: Action over a tree with no Python (must go red by default)
+        id: nopython
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: docs/design
+      - name: The no-Python run failed
+        env:
+          OUTCOME: ${{ steps.nopython.outcome }}
+        run: test "$OUTCOME" = failure
+      # (d) The same tree under `skip`: the three source lints are named
+      # skips and ci-step still passes, so the job passes - the half of the
+      # pair that shows (c) failed for the exit 2 and not for the tree.
+      - name: Action over a tree with no Python, on-cannot-run skip (must pass)
+        uses: ./
+        with:
+          paths: docs/design
+          on-cannot-run: skip
+      # (e) An input carrying a shell command where a path belongs must be
+      # refused, and the command must not have run.
+      - name: Action given a shell command as a path (must be refused)
+        id: injected
+        continue-on-error: true
+        uses: ./
+        with:
+          paths: 'src; touch /tmp/sutradhar-injected'
+      - name: The injection-shaped input was refused and ran nothing
+        env:
+          OUTCOME: ${{ steps.injected.outcome }}
+        run: |
+          test "$OUTCOME" = failure
+          test ! -e /tmp/sutradhar-injected
+
   probe:
     name: Probe selftest (real core vs real bridge)
     runs-on: ubuntu-latest

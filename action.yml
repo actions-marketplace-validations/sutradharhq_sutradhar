@@ -1,0 +1,116 @@
+# Copyright 2026 Varun Mundra. Licensed under the Apache License, Version 2.0.
+# Part of Sutradhar: https://github.com/sutradharhq/sutradhar
+#
+# Sutradhar's guards as a GitHub Action: one `uses:` line, no install step.
+#
+#   - uses: actions/checkout@v4
+#   - uses: sutradharhq/sutradhar@v0.6.0
+#     with:
+#       paths: src
+#
+# A composite action with one step. It runs action/run_guards.py from this
+# action's own checkout with the runner's python3 (3.9 or newer; Linux and
+# macOS runners) - stdlib only, so there is nothing to install. Every input
+# reaches that script through `env:` and is never pasted into the `run:`
+# body: `${{ inputs.x }}` inside a `run:` is the Actions injection hole, and
+# doctrine 2.8's shape in YAML. python/tests/test_distribution.py fails the
+# build on any `${{` in a `run:` body here.
+#
+# Exit codes are the guards' own: 0 clean, 1 a finding (fails the job), 2
+# could not run - fails the job by default; see `on-cannot-run`.
+
+name: Sutradhar guards
+description: >-
+  Fail CI on silent exception swallows, query string interpolation,
+  failures that read as empty results, and CI steps that cannot reach
+  their script or pipe away its exit code. Stdlib-only Python, no install.
+author: Varun Mundra
+branding:
+  icon: shield
+  color: orange
+
+inputs:
+  guards:
+    description: >-
+      Comma-separated guards to run. Default: the four that need no
+      configuration. Opt-in: `budget` (design-note budgets have a test
+      behind them; reads design-dir and tests-dir) and `rounds` (round
+      records are valid; reads rounds-dir).
+    required: false
+    default: swallow,interpolation,conflated-degrade,ci-step
+  paths:
+    description: >-
+      Space-separated directories or files holding your Python source, read
+      by swallow, interpolation and conflated-degrade. Relative to the
+      workspace. Shell metacharacters and a leading `-` are refused.
+    required: false
+    default: .
+  workflows:
+    description: Workflow directory or file read by ci-step.
+    required: false
+    default: .github/workflows
+  on-cannot-run:
+    description: >-
+      What a guard that exits 2 (could not run - for example, no Python file
+      under `paths`) does to the job. `fail` (default) fails it, because a
+      job that goes green when a guard read nothing is a pass for a check
+      that never ran. `skip` reports it as a named skip - the guard's own
+      sentence, a warning annotation, a step-summary row - and still fails
+      when every selected guard was skipped.
+    required: false
+    default: fail
+  swallow-baseline:
+    description: >-
+      Ratchet baseline for swallow (from `swallow_lint.py --update-baseline`).
+      Empty: swallow_baseline.json at the workspace root is honoured if it
+      exists. A file named here must exist.
+    required: false
+    default: ''
+  conflated-degrade-baseline:
+    description: >-
+      Ratchet baseline for conflated-degrade. Empty:
+      conflated_degrade_baseline.json at the workspace root is honoured if it
+      exists. A file named here must exist.
+    required: false
+    default: ''
+  interpolation-allowlist:
+    description: JSON list of reviewed names interpolation may skip. Must exist if named.
+    required: false
+    default: ''
+  interpolation-keywords:
+    description: >-
+      Query languages interpolation looks for, such as `sql,cypher`. Empty:
+      the guard's default (SQL and SPARQL keywords).
+    required: false
+    default: ''
+  design-dir:
+    description: Design notes read by the opt-in `budget` guard.
+    required: false
+    default: docs/design
+  tests-dir:
+    description: Tests read by the opt-in `budget` guard.
+    required: false
+    default: tests
+  rounds-dir:
+    description: Round records read by the opt-in `rounds` guard.
+    required: false
+    default: docs/rounds
+
+runs:
+  using: composite
+  steps:
+    - name: Run the Sutradhar guards
+      shell: bash
+      env:
+        SUTRADHAR_GUARDS: ${{ inputs.guards }}
+        SUTRADHAR_PATHS: ${{ inputs.paths }}
+        SUTRADHAR_WORKFLOWS: ${{ inputs.workflows }}
+        SUTRADHAR_ON_CANNOT_RUN: ${{ inputs.on-cannot-run }}
+        SUTRADHAR_SWALLOW_BASELINE: ${{ inputs.swallow-baseline }}
+        SUTRADHAR_CONFLATED_DEGRADE_BASELINE: ${{ inputs.conflated-degrade-baseline }}
+        SUTRADHAR_INTERPOLATION_ALLOWLIST: ${{ inputs.interpolation-allowlist }}
+        SUTRADHAR_INTERPOLATION_KEYWORDS: ${{ inputs.interpolation-keywords }}
+        SUTRADHAR_DESIGN_DIR: ${{ inputs.design-dir }}
+        SUTRADHAR_TESTS_DIR: ${{ inputs.tests-dir }}
+        SUTRADHAR_ROUNDS_DIR: ${{ inputs.rounds-dir }}
+      run: python3 "${GITHUB_ACTION_PATH}/action/run_guards.py"

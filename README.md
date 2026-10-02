@@ -87,6 +87,47 @@ guard's own output when one is red.
 Read [SECURITY.md](SECURITY.md) before you install it: it says plainly what
 runs as you, where, and what the parser does and does not stop.
 
+## Use it in CI
+
+One step in any workflow, after your checkout. Nothing to install: the
+guards are stdlib Python and run on the runner's own `python3` (Linux and
+macOS runners).
+
+```yaml
+- uses: actions/checkout@v4
+- uses: sutradharhq/sutradhar@v0.6.0
+  with:
+    paths: src          # where your Python lives; default is the whole repo
+```
+
+It fails the job on a silent exception swallow, a value pasted into a SQL
+string, a failure that returns the same thing as "nothing there", or a CI
+step that can't reach its script or pipes its exit code away. If a guard
+can't run at all - say `paths` holds no Python - the job fails and says so;
+set `on-cannot-run: skip` to turn that into a visible, named skip instead.
+Existing findings? Commit the `swallow_baseline.json` that
+`python3 swallow_lint.py src --update-baseline` writes, and the action holds
+you to that floor rather than to zero. Every input is documented in
+[action.yml](action.yml). Available from the v0.6.0 release.
+
+## Use it with pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/sutradharhq/sutradhar
+    rev: v0.6.0
+    hooks:
+      - id: sutradhar-swallow
+      - id: sutradhar-interpolation
+      - id: sutradhar-conflated-degrade
+      - id: sutradhar-ci-step
+```
+
+The same four guards, before the commit instead of after the push. A guard
+that can't run blocks the commit and prints why, rather than letting it
+through quietly. Needs `python3` 3.9 or newer on your PATH; nothing is
+installed. Available from the v0.6.0 release.
+
 ## Framework, not a product
 
 "Harness" is an overloaded word. Some harnesses are products - an agent
