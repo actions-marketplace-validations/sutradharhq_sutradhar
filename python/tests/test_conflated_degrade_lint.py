@@ -555,3 +555,56 @@ def test_r28_a_fifo_named_like_a_module_is_named_not_read(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "src/pipe.py: is not a regular file" in r.stdout, r.stdout
+
+
+def test_r27_update_baseline_is_refused_over_an_unjudged_file(tmp_path,
+                                                             monkeypatch,
+                                                             capsys):
+    """Refused: exit 2, the baseline bytes untouched, the file named. Pair:
+    the same walk with nothing unjudged writes the floor.
+
+    Mutation (the line that runs, in main): `if update and unjudged:` ->
+    `if False and unjudged:` - the floor is written over the partial walk,
+    red.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "m.py").write_text(_CONFLATED)
+    (src / "bad.py").write_bytes(b"def (:\n")
+    base = tmp_path / "b.json"
+    base.write_text('["old::x"]\n')
+    monkeypatch.chdir(tmp_path)
+    assert cdl.main(["src", "--update-baseline", "--baseline", "b.json"]) == 2
+    out = capsys.readouterr()
+    assert base.read_bytes() == b'["old::x"]\n'
+    assert "src/bad.py: does not parse" in out.out, out.out
+    assert "baseline NOT written" in out.err, out.err
+    (src / "bad.py").unlink()
+    assert cdl.main(["src", "--update-baseline", "--baseline", "b.json"]) == 0
+    assert json.loads(base.read_text()) == ["src/m.py::read"]
+
+
+def test_r27_a_banked_entry_in_an_unjudged_file_is_not_called_fixed(
+        tmp_path, monkeypatch, capsys):
+    """Nobody may be told to delete a floor entry for a file that was never
+    read: the banked conflation in an unparsable file stays banked, and the
+    run is 2 (not judged), not 1 ("now distinguishable"). Pair: the same
+    banked entry in a file that parses and no longer conflates IS stale.
+
+    Mutation (the line that runs, in main): `fixed = [k for k in fixed if
+    k.split("::", 1)[0] not in not_judged]` -> `fixed = [k for k in fixed
+    if True]` - exit 1 with the entry reported fixed, red.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "m.py").write_bytes(b"def (:\n")
+    (tmp_path / "b.json").write_text('["src/m.py::read"]\n')
+    monkeypatch.chdir(tmp_path)
+    assert cdl.main(["src", "--baseline", "b.json"]) == 2
+    out = capsys.readouterr().out
+    assert "now distinguishable" not in out, out
+    assert "src/m.py: does not parse" in out, out
+    (src / "m.py").write_text("def read(store):\n    return store.get()\n")
+    assert cdl.main(["src", "--baseline", "b.json"]) == 1
+    out = capsys.readouterr().out
+    assert "now distinguishable" in out and "src/m.py::read" in out, out

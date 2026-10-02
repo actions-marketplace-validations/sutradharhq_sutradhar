@@ -454,3 +454,33 @@ def test_r28_a_fifo_named_like_a_module_is_named_not_read(tmp_path):
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "src/pipe.py: is not a regular file" in r.stdout, r.stdout
+
+
+def test_r27_update_baseline_is_refused_over_an_unjudged_file(tmp_path,
+                                                             monkeypatch,
+                                                             capsys):
+    """A floor recorded without a file it could not read would re-flag that
+    file's swallows as new the day it parses. Refused: exit 2, the baseline
+    bytes untouched, the file named. Pair: the same walk with nothing
+    unjudged writes the floor.
+
+    Mutation (the line that runs, in main): `if update and unjudged:` ->
+    `if False and unjudged:` - the floor is written over the partial walk,
+    red.
+    """
+    from sutradhar_guards.swallow_lint import main
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "real.py").write_text(_R27_BAD)
+    (src / "bad.py").write_bytes(b"def (:\n")
+    base = tmp_path / "b.json"
+    base.write_text('{"old": 1}\n')
+    monkeypatch.chdir(tmp_path)
+    assert main(["src", "--update-baseline", "--baseline", "b.json"]) == 2
+    out = capsys.readouterr()
+    assert base.read_bytes() == b'{"old": 1}\n'
+    assert "src/bad.py: does not parse" in out.out, out.out
+    assert "baseline NOT written" in out.err, out.err
+    (src / "bad.py").unlink()
+    assert main(["src", "--update-baseline", "--baseline", "b.json"]) == 0
+    assert json.loads(base.read_text()) == {"src/real.py": 1}
