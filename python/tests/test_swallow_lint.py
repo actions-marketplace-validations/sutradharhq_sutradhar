@@ -291,3 +291,33 @@ def test_a_file_and_a_symlink_to_it_are_read_once(tmp_path, monkeypatch,
     monkeypatch.chdir(tmp_path)
     assert main(["src", "--baseline", "none.json"]) == 0
     assert "OK (1 files" in capsys.readouterr().out
+
+
+def test_a_symlink_out_of_the_scanned_paths_is_skipped_and_said(
+        tmp_path, monkeypatch, capsys):
+    """R24-23's outside-root rule, pinned here as well as in
+    conflated_degrade_lint: a link to a swallow outside every scanned
+    directory is skipped and the count printed; the same file inside the
+    scanned root is still reported (the pair).
+
+    Mutation (the line that runs, in _read_once): `if is_link and not
+    any(...)` -> `if False and not any(...)` - the far swallow is read
+    through the link and fails the clean tree, red.
+    """
+    from sutradhar_guards.swallow_lint import main
+    bad = ("def f(s):\n    try:\n        return s.read()\n"
+           "    except Exception:\n        pass\n")
+    far = tmp_path / "elsewhere"
+    far.mkdir()
+    (far / "far.py").write_text(bad)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("x = 1\n")
+    (src / "out.py").symlink_to(far / "far.py")
+    monkeypatch.chdir(tmp_path)
+    assert main(["src", "--baseline", "none.json"]) == 0
+    assert "skipped 1 symlinked file(s)" in capsys.readouterr().out
+    (src / "out.py").unlink()
+    (src / "inside.py").write_text(bad)
+    assert main(["src", "--baseline", "none.json"]) == 1
+    assert "src/inside.py" in capsys.readouterr().out

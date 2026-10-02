@@ -247,3 +247,31 @@ def test_a_file_and_a_symlink_to_it_report_once(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "1 query interpolation risk(s)" in out, out
     assert "src/a.py:2" in out and "link.py" not in out, out
+
+
+def test_a_symlink_out_of_the_scanned_paths_is_skipped_and_said(
+        tmp_path, monkeypatch, capsys):
+    """R24-23's outside-root rule, pinned here as well as in
+    conflated_degrade_lint: a link to an interpolated query outside every
+    scanned directory is skipped and the count printed; the same file
+    inside the scanned root is still reported (the pair).
+
+    Mutation (the line that runs, in _read_once): `if is_link and not
+    any(...)` -> `if False and not any(...)` - the far query is read
+    through the link and fails the clean tree, red.
+    """
+    bad = "def q(x):\n    return f\"SELECT * FROM t WHERE a = '{x}'\"\n"
+    far = tmp_path / "elsewhere"
+    far.mkdir()
+    (far / "far.py").write_text(bad)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("x = 1\n")
+    (src / "out.py").symlink_to(far / "far.py")
+    monkeypatch.chdir(tmp_path)
+    assert main(["src"]) == 0
+    assert "skipped 1 symlinked file(s)" in capsys.readouterr().out
+    (src / "out.py").unlink()
+    (src / "inside.py").write_text(bad)
+    assert main(["src"]) == 1
+    assert "src/inside.py:2" in capsys.readouterr().out
