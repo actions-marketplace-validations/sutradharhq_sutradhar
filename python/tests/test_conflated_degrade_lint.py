@@ -133,8 +133,11 @@ def outer():
     assert "a.py::outer.inner" in keys
 
 
-def test_a_syntax_error_is_not_a_finding():
-    assert cdl.find_conflated_degrades("def (:\n", "a.py") == []
+def test_a_syntax_error_is_not_judged_rather_than_clean():
+    """R24-27: this test pinned `[]` - the clean answer - for a file that
+    does not parse, which is the false green itself."""
+    with pytest.raises(cdl.NotJudged):
+        cdl.find_conflated_degrades("def (:\n", "a.py")
 
 
 # ── the key is an identity, not a position (R18-1) ──────────────────────────
@@ -421,3 +424,134 @@ def test_a_symlink_out_of_the_scanned_paths_is_skipped_and_said(
     assert cdl.main(["src", "--baseline", "none.json"]) == 0
     assert "skipped 1 symlinked file(s)" in capsys.readouterr().out
     assert cdl.main(["elsewhere", "--baseline", "none.json"]) == 1
+
+
+# ── R24-27..29: every file the walk does not judge is named ─────────────────
+#
+# A byte-order mark, a NUL byte, or syntax newer than the interpreter made
+# the file unparsable and the lint returned no findings for it - clean.
+# Each case below runs through main() from inside the tree, as CI runs it.
+
+_R27_BAD = _CONFLATED
+
+
+def _r27(tmp_path, monkeypatch, capsys, files: dict) -> tuple:
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        p = src / name
+        if isinstance(body, bytes):
+            p.write_bytes(body)
+        else:
+            p.write_text(body)
+    monkeypatch.chdir(tmp_path)
+    code = cdl.main(["src", "--baseline", "none.json"])
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_r27_a_bom_prefixed_defect_is_found_as_the_plain_one_is(
+        tmp_path, monkeypatch, capsys):
+    """The pair: the BOM twin's finding is the plain twin's finding.
+
+    Mutation (the line that runs, in read_source): `encoding="utf-8-sig"`
+    -> `encoding="utf-8"` - the BOM file is NOT JUDGED, exit 2, red.
+    """
+    code, out, _ = _r27(tmp_path / "a", monkeypatch, capsys,
+                        {"m.py": b"\xef\xbb\xbf" + _R27_BAD.encode()})
+    assert code == 1, out
+    assert "src/m.py:1 read" in out, out
+    code, out, _ = _r27(tmp_path / "b", monkeypatch, capsys, {"m.py": _R27_BAD})
+    assert code == 1 and "src/m.py:1 read" in out, out
+
+
+@pytest.mark.parametrize("body", [b"def (:\n", b"x = 'a\x00b'\n"],
+                         ids=["syntax-error", "nul-byte"])
+def test_r27_an_unparsable_file_is_named_and_exits_two(
+        tmp_path, monkeypatch, capsys, body):
+    """Mutation (the line that runs, in _parse): `raise NotJudged(...)` ->
+    `return ast.parse("")` (an empty tree: the old `return []`) - exit 0,
+    red.
+    """
+    code, out, err = _r27(tmp_path, monkeypatch, capsys,
+                          {"bad.py": body, "ok.py": "x = 1\n"})
+    assert code == 2, out + err
+    assert "NOT JUDGED" in out and "src/bad.py: does not parse" in out, out
+    assert "could not judge 1 file(s) (src/bad.py)" in err, err
+
+
+def test_r27_an_unparsable_file_beside_a_finding_is_exit_one_and_still_named(
+        tmp_path, monkeypatch, capsys):
+    """A finding outranks a file not judged: under the Action's skip a 2 is
+    a pass, so the unparsable neighbour would have hidden the finding.
+
+    Mutation (the line that runs, in _verdict): `return 1 if found else 2
+    if unjudged else 0` -> `return 2 if unjudged else 1 if found else 0` -
+    exit 2, red.
+    """
+    code, out, _ = _r27(tmp_path, monkeypatch, capsys,
+                        {"bad.py": b"def (:\n", "real.py": _R27_BAD})
+    assert code == 1, out
+    assert "src/m.py:1 read".replace("m.py", "real.py") in out, out
+    assert "src/bad.py: does not parse" in out, out
+
+
+def test_r28_a_directory_named_like_a_module_is_not_read(
+        tmp_path, monkeypatch, capsys):
+    """rglob yielded a directory named `fixtures.py`, read_text raised
+    IsADirectoryError, and the guard crashed. Now it is a directory.
+
+    Mutation: none on a single line - the walk (os.walk) never lists a
+    directory among files; the regression it pins is a return to rglob.
+    """
+    (tmp_path / "src" / "fixtures.py").mkdir(parents=True)
+    code, out, err = _r27(tmp_path, monkeypatch, capsys, {"ok.py": "x = 1\n"})
+    assert code == 0, out + err
+
+
+def test_r28_a_symlink_loop_is_named_not_a_crash(tmp_path, monkeypatch, capsys):
+    """Mutation (the line that runs, in _walk): `target =
+    f.resolve(strict=True)` -> `target = f.resolve()` - a loop resolves to
+    itself on this Python or raises; either way it is no longer named, red.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "loop.py").symlink_to("loop.py")
+    code, out, err = _r27(tmp_path, monkeypatch, capsys, {"ok.py": "x = 1\n"})
+    assert code == 2, out + err
+    assert "src/loop.py: is a symlink that does not resolve" in out, out
+
+
+def test_r29_a_symlinked_directory_is_said_not_silent(
+        tmp_path, monkeypatch, capsys):
+    """Mutation (the line that runs, in _walk): `linked_dirs.append(p)` ->
+    `pass` - nothing said, red.
+    """
+    far = tmp_path / "far"
+    far.mkdir()
+    (far / "m.py").write_text(_R27_BAD)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "linked").symlink_to(far)
+    code, out, _ = _r27(tmp_path, monkeypatch, capsys, {"ok.py": "x = 1\n"})
+    assert code == 0, out
+    assert "did not descend 1 symlinked director(ies): src/linked" in out, out
+
+
+def test_r28_a_fifo_named_like_a_module_is_named_not_read(tmp_path):
+    """A FIFO named `pipe.py` is listed among a directory's files, and
+    reading it blocks forever: the guard would hang the job. Run in a
+    subprocess so a regression is a timeout, not a hung suite.
+
+    Mutation (the line that runs, in _walk): `elif not f.is_file():` ->
+    `elif False:` - the read blocks, TimeoutExpired, red.
+    """
+    import os
+    import subprocess
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("x = 1\n")
+    os.mkfifo(src / "pipe.py")
+    guard = Path(__file__).resolve().parents[1] / "sutradhar_guards" / "conflated_degrade_lint.py"
+    r = subprocess.run([sys.executable, str(guard), *["src", "--baseline", "none.json"]], cwd=tmp_path,
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "src/pipe.py: is not a regular file" in r.stdout, r.stdout

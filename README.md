@@ -110,6 +110,12 @@ Existing findings? Commit the `swallow_baseline.json` that
 you to that floor rather than to zero. Every input is documented in
 [action.yml](action.yml). Available from the v0.6.0 release.
 
+The action reads your tree as data: every guard runs in Python's isolated
+mode, so nothing in the checkout is imported. It does call `python3` by
+name, so if an earlier step prepends a directory from the checked-out tree
+to `$GITHUB_PATH` (an in-tree `bin/`, `node_modules/.bin`, a virtualenv),
+that tree supplies the interpreter the action runs (R24-30).
+
 ## Use it with pre-commit
 
 ```yaml
@@ -126,7 +132,9 @@ repos:
 The same four guards, before the commit instead of after the push. A guard
 that can't run blocks the commit and prints why, rather than letting it
 through quietly. Needs `python3` 3.9 or newer on your PATH; nothing is
-installed. Available from the v0.6.0 release.
+installed. Available from the v0.6.0 release. The hooks run with your own
+environment: a `PYTHONPATH=.` exported in your shell is yours, not the
+hook's, and puts your working tree on the guards' import path (R24-30).
 
 ## Framework, not a product
 

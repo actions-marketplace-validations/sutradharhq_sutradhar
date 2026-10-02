@@ -187,11 +187,10 @@ def functions_with_qualnames(tree: ast.AST) -> list:
 
 
 def find_conflated_degrades(source: str, path: str = "<src>") -> list:
-    """One `Conflation` per function that conflates a failure with an absence."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    """One `Conflation` per function that conflates a failure with an
+    absence. Raises NotJudged when the source does not parse: an empty list
+    is a clean answer, and an unparsable file has not been given one."""
+    tree = _parse(source)
     return [
         Conflation(f"{path}::{qual}", fn.lineno, path, qual)
         for qual, fn in functions_with_qualnames(tree)
@@ -367,14 +366,14 @@ def _selfcheck_body() -> bool:
         except OSError:
             linked = False  # no symlinks on this filesystem: nothing to pin
         if linked:
-            got, files, _, outside = scan([inside])
+            got, files, _, outside, _, _ = scan([inside])
             if len(files) != 1 or len(got) != 1 or outside != 1:
                 problems.append(
                     f"a file and a symlink to it, plus a link out of the "
                     f"scan: read {len(files)} file(s) for {len(got)} "
                     f"finding(s), {outside} skipped - expected 1, 1, 1"
                 )
-            got, files, _, _ = scan([inside / "reader.py"])
+            got, files, _, _, _, _ = scan([inside / "reader.py"])
             if len(got) != 1:
                 problems.append("the symlink's target alone lost its finding")
 
@@ -418,6 +417,33 @@ def _selfcheck_body() -> bool:
                 "<src>::read#2"]:
         problems.append(f"qualified keys are wrong: {keys}")
 
+    # R24-27, two pairs: a byte-order mark does not hide a finding (the BOM
+    # twin finds what the plain twin finds), and a file that does not parse
+    # is NOT (lambda p: find_conflated_degrades(read_source(p)))D - never the empty list a clean file returns.
+    with tempfile.TemporaryDirectory() as td:
+        plain, bom, broken = (Path(td) / n for n in ("p.py", "b.py", "x.py"))
+        plain.write_text(_BAD, encoding="utf-8")
+        bom.write_bytes(b"\xef\xbb\xbf" + _BAD.encode("utf-8"))
+        broken.write_text("def (:\n", encoding="utf-8")
+        want = (lambda p: find_conflated_degrades(read_source(p)))(plain)
+        try:
+            got = (lambda p: find_conflated_degrades(read_source(p)))(bom)
+        except NotJudged as exc:
+            # A selfcheck that raises has reported nothing (6.11): the
+            # failure is a named problem, never a traceback.
+            got = f"not judged ({exc})"
+        if not want or got != want:
+            problems.append(
+                f"a byte-order mark changed the verdict: plain {want}, "
+                f"BOM-prefixed {got}"
+            )
+        try:
+            got = (lambda p: find_conflated_degrades(read_source(p)))(broken)
+            problems.append(f"an unparsable file was judged, as {got!r}, "
+                            f"instead of named as not judged")
+        except NotJudged:
+            pass
+
     for p in problems:
         print(f"[conflated-degrade-lint] SELFCHECK FAILED: {p}")
     if not problems:
@@ -428,7 +454,8 @@ def _selfcheck_body() -> bool:
             "reported for banking, same-named defs keyed apart, a directory "
             "with no Python file refused with exit 2, one clean file passed, "
             "a file and its symlink read once and a link out of the scan "
-            "skipped"
+            "skipped, a BOM-prefixed conflation found as the plain one is, "
+            "an unparsable file not judged"
         )
     return not problems
 
@@ -439,6 +466,10 @@ def _rel(p: Path) -> str:
     try:
         return str(p.resolve().relative_to(Path.cwd()))
     except ValueError:
+        return str(p)
+    except (OSError, RuntimeError):
+        # A symlink loop cannot be resolved; it is named by the path it was
+        # reached at, because it is reported as not judged (R24-28).
         return str(p)
 
 
@@ -456,6 +487,138 @@ def _is_vendor(path: Path, root: Path) -> bool:
         part in VENDOR_DIRS or part.endswith(".egg-info")
         for part in rel.parts[:-1]
     )
+
+
+class NotJudged(Exception):
+    """A file the walk reached and could not judge, with the reason (R24-27).
+
+    Raised, never answered with an empty list: no findings is what a clean
+    file returns, and a file that did not parse - a byte-order mark read as
+    a character, a NUL byte, syntax newer than the running interpreter -
+    used to return exactly that. Three bytes at the top of a file hid every
+    finding in it under a pass (2.9 at file granularity).
+    """
+
+
+def _parse(source: str) -> "ast.AST":
+    """The tree, or NotJudged saying why there is none."""
+    try:
+        return ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        if isinstance(exc, SyntaxError):
+            at = f" at line {exc.lineno}" if exc.lineno else ""
+            why = f"SyntaxError{at}: {exc.msg}"
+        else:
+            why = f"{type(exc).__name__}: {exc}"
+        raise NotJudged(f"does not parse under this Python ({why})") from None
+
+
+def read_source(path: Path) -> str:
+    """The file's text as the interpreter reads it. `utf-8-sig`, so a leading
+    byte-order mark is dropped - Python imports such a file, and read as
+    `utf-8` the mark reached the parser as a character it refuses (R24-27)."""
+    try:
+        return path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise NotJudged(f"could not be read ({type(exc).__name__}: "
+                        f"{exc.strerror or exc})") from None
+
+
+def _walk(paths: list, vendor=None) -> tuple:
+    """(named, walked, symlinked dirs, unjudged, vendor-skipped .py count).
+
+    One walk, and nothing it passes over is silent (R24-28, R24-29). A
+    directory named like `fixtures.py` is a directory, not a file to read.
+    A symlink named `.py` that does not resolve - a loop, a dangling link -
+    and a `.py` that is not a regular file - a FIFO would block the read -
+    are unjudged with the reason, never a crash or a hang of the instrument. A
+    symlinked directory is not descended (the walk never followed them) and
+    is now returned so the caller says so. Files named on the command line
+    are taken as named.
+    """
+    import os
+
+    named: list = []
+    walked: list = []
+    linked_dirs: list = []
+    unjudged: list = []
+    skipped_vendor = 0
+    for root in paths:
+        if root.is_file() and root.suffix == ".py":
+            named.append(root)
+            continue
+        for here, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            base = Path(here)
+            for d in dirnames:
+                p = base / d
+                if os.path.islink(p) and not (vendor and vendor(p, root)):
+                    linked_dirs.append(p)
+            for name in sorted(filenames):
+                if not name.endswith(".py"):
+                    continue
+                f = base / name
+                if "__pycache__" in f.parts:
+                    continue
+                if vendor and vendor(f, root):
+                    skipped_vendor += 1
+                    continue
+                if f.is_symlink():
+                    try:
+                        target = f.resolve(strict=True)
+                    except (OSError, RuntimeError) as exc:
+                        unjudged.append((f, f"is a symlink that does not "
+                                            f"resolve ({type(exc).__name__})"))
+                        continue
+                    if target.is_dir():
+                        linked_dirs.append(f)
+                        continue
+                    if not target.is_file():
+                        unjudged.append((f, "is a symlink to something that "
+                                            "is not a regular file"))
+                        continue
+                elif not f.is_file():
+                    # A FIFO or socket named `.py`: reading it would block
+                    # or fail, so it is named, never read (R24-28).
+                    unjudged.append((f, "is not a regular file"))
+                    continue
+                walked.append(f)
+    return named, walked, linked_dirs, unjudged, skipped_vendor
+
+
+def _verdict(found: bool, unjudged: bool) -> int:
+    """1 a finding, else 2 a file not judged, else 0 (R24-27). A finding is
+    a verdict that holds whatever the unjudged files contain, and must not
+    be lowered to 2: under the Action's `on-cannot-run: skip` a 2 is a pass,
+    so one unparsable file beside a real finding would have hidden it."""
+    return 1 if found else 2 if unjudged else 0
+
+
+def _say_walk(tag: str, linked_dirs: list) -> None:
+    if linked_dirs:
+        shown = ", ".join(str(p) for p in linked_dirs[:5])
+        more = f" and {len(linked_dirs) - 5} more" if len(linked_dirs) > 5 else ""
+        print(f"[{tag}] did not descend {len(linked_dirs)} symlinked "
+              f"director(ies): {shown}{more}; name the target directory to "
+              f"scan it")
+
+
+def _say_unjudged(tag: str, unjudged: list, show, decides: bool) -> None:
+    """Name every file not judged. When it decides the exit (2), the last
+    stderr line says so, because that is the line a caller quotes."""
+    if not unjudged:
+        return
+    print(f"[{tag}] {len(unjudged)} file(s) NOT JUDGED - reached, not "
+          f"checked, and not counted as clean (2.9):")
+    for f, why in unjudged:
+        print(f"  {show(f)}: {why}")
+    if decides:
+        names = ", ".join(show(f) for f, _ in unjudged[:3])
+        print(f"[{tag}] could not judge {len(unjudged)} file(s) ({names}"
+              f"{', ...' if len(unjudged) > 3 else ''}): this is not a pass "
+              f"(2.9). Fix the file, remove it from the scanned paths, or "
+              f"run the guard under a Python that parses it.",
+              file=sys.stderr)
 
 
 def _read_once(named: list, walked: list, roots: list) -> tuple:
@@ -494,26 +657,18 @@ def _read_once(named: list, walked: list, roots: list) -> tuple:
 
 def scan(paths: list, include_vendor: bool = False) -> tuple:
     """(findings, files read, files skipped as vendor, symlinks skipped as
-    leaving the scanned paths)."""
+    leaving the scanned paths, [(file, why) not judged], symlinked
+    directories not descended)."""
     found: list = []
-    named: list = []
-    walked: list = []
-    skipped = 0
-    for root in paths:
-        if root.is_file() and root.suffix == ".py":
-            named.append(root)
-            continue
-        for f in sorted(root.rglob("*.py")):
-            if not include_vendor and _is_vendor(f, root):
-                skipped += 1
-                continue
-            walked.append(f)
+    named, walked, linked_dirs, unjudged, skipped = _walk(
+        paths, None if include_vendor else _is_vendor)
     files, outside = _read_once(named, walked, paths)
     for f in files:
-        found.extend(find_conflated_degrades(
-            f.read_text(encoding="utf-8", errors="replace"), _rel(f)
-        ))
-    return found, files, skipped, outside
+        try:
+            found.extend(find_conflated_degrades(read_source(f), _rel(f)))
+        except NotJudged as exc:
+            unjudged.append((f, str(exc)))
+    return found, files, skipped, outside, unjudged, linked_dirs
 
 
 _KNOWN_FLAGS = {
@@ -569,7 +724,9 @@ def main(argv: "list | None" = None) -> int:
     if not selfcheck():
         return 1
 
-    found, files, skipped, outside = scan(paths, include_vendor)
+    found, files, skipped, outside, unjudged, linked_dirs = scan(
+        paths, include_vendor)
+    _say_walk("conflated-degrade-lint", linked_dirs)
     if outside:
         print(
             f"[conflated-degrade-lint] skipped {outside} symlinked file(s) "
@@ -589,7 +746,7 @@ def main(argv: "list | None" = None) -> int:
     # Zero files read is "could not measure", never "at the floor" (2.9),
     # and that holds for --update-baseline too: a floor recorded over
     # nothing is a floor of nothing (R21-2).
-    if not files:
+    if not files and not unjudged:
         states = ", ".join(
             f"{p} ({'does not exist' if not p.exists() else 'is not a .py file' if p.is_file() else 'holds no .py file'})"
             for p in paths
@@ -618,6 +775,11 @@ def main(argv: "list | None" = None) -> int:
         )
         return 2
 
+    if update and unjudged:
+        _say_unjudged("conflated-degrade-lint", unjudged, _rel, True)
+        print("[conflated-degrade-lint] baseline NOT written: it would be a "
+              "floor that silently leaves these files out.", file=sys.stderr)
+        return 2
     if update:
         baseline_path.write_text(json.dumps(sorted(keys), indent=2) + "\n")
         print(
@@ -628,7 +790,12 @@ def main(argv: "list | None" = None) -> int:
 
     base = set(json.loads(baseline_path.read_text())) if baseline_path.exists() else set()
     new, fixed = compare(found, base)
+    # A banked entry in a file that was not judged is not "now
+    # distinguishable": nobody looked. It stays banked, and the file is named.
+    not_judged = {_rel(f) for f, _ in unjudged}
+    fixed = [k for k in fixed if k.split("::", 1)[0] not in not_judged]
 
+    code = _verdict(bool(new or fixed), bool(unjudged))
     if new:
         print(
             f"\n[conflated-degrade-lint] {len(new)} function(s) return the "
@@ -642,8 +809,7 @@ def main(argv: "list | None" = None) -> int:
             "defect. Return (value, ok), set a counter the caller reads, or "
             "carry a reason - do not simply raise.\n"
         )
-        return 1
-    if fixed:
+    elif fixed:
         print(
             f"\n[conflated-degrade-lint] {len(fixed)} baselined conflation(s) "
             f"are now distinguishable; bank the lower floor with "
@@ -651,7 +817,9 @@ def main(argv: "list | None" = None) -> int:
         )
         for k in fixed:
             print(f"  {k}")
-        return 1
+    _say_unjudged("conflated-degrade-lint", unjudged, _rel, code == 2)
+    if code:
+        return code
     print(
         f"[conflated-degrade-lint] OK ({len(files)} file(s), {len(base)} "
         f"baselined conflation(s) - the ratchet only shrinks)"

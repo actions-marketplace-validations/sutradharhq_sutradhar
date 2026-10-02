@@ -583,3 +583,29 @@ def test_a_symlinked_conflation_fails_the_action_even_under_skip(tmp_path):
     (src / "link.py").unlink()
     r = act()
     assert r.returncode == 1, r.stdout
+
+
+def test_a_bom_prefixed_swallow_is_a_finding_at_the_action_not_a_pass(tmp_path):
+    """R24-27 at the Action's seam: three bytes at the top of a file made all
+    three source lints read it as clean, and the job passed. Under the
+    default policy the BOM twin is now the same finding as the plain twin.
+
+    Mutation: swallow_lint's read_source `encoding="utf-8-sig"` ->
+    `encoding="utf-8"` - swallow exits 2 (not judged), not 1, red.
+    """
+    swallow = ("def f(s):\n    try:\n        return s.read()\n"
+               "    except Exception:\n        pass\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SUTRADHAR_", "GITHUB_"))}
+    env.update({"SUTRADHAR_PATHS": "src",
+                "SUTRADHAR_GUARDS": "swallow,interpolation,conflated-degrade"})
+    for twin, body in (("bom", b"\xef\xbb\xbf" + swallow.encode()),
+                       ("plain", swallow.encode())):
+        tree = tmp_path / twin
+        (tree / "src").mkdir(parents=True)
+        (tree / "src" / "app.py").write_bytes(body)
+        r = subprocess.run([sys.executable, "-I", str(DRIVER)], cwd=tree,
+                           env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 1, (twin, r.stdout + r.stderr)
+        assert "swallow: exit 1 -> finding" in r.stdout, (twin, r.stdout)
+        assert "src/app.py:4" in r.stdout, (twin, r.stdout)

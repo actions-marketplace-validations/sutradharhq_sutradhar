@@ -421,3 +421,16 @@ def test_not_applicable_twins_do_not_fail_a_sweep_that_measured_one(
     code, said = _run([str(tmp_path), "--sweep", "fake", "--json"])
     assert code == 0, said
     assert "1 measured-silent, 1 not-applicable, 0 flagged" in said
+
+
+def test_the_byte_order_mark_case_really_materializes_the_mark(tmp_path):
+    """R24-27's case is only a case if both twins start with EF BB BF on
+    disk; an editor that strips the invisible U+FEFF would quietly turn it
+    into an ordinary swallow case. Pinned on the materialized bytes."""
+    root = Path(__file__).resolve().parents[2] / "corpus"
+    case = [c for c in load_cases(root)
+            if c.id == "swallow-behind-a-byte-order-mark"][0]
+    for twin in ("defective", "clean"):
+        out = corpus.materialize(case, tmp_path / twin, twin)
+        data = (out / "app" / "reader.py").read_bytes()
+        assert data.startswith(b"\xef\xbb\xbf"), (twin, data[:8])

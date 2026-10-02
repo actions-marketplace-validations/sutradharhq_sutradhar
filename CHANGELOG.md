@@ -77,6 +77,35 @@ summary, or code the Action runs** (round 24, R24-1, R24-22, doctrine 6.8).
   emphasis, autolink or table break survives in CommonMark or GFM; GitHub's
   own mention and issue linking after render is not covered (R24-25).
 
+**A file the source lints cannot parse is named, never counted as clean**
+(round 24, R24-27 to R24-29, doctrine 2.9).
+
+- A UTF-8 byte-order mark at the top of a file made `swallow_lint`,
+  `interpolation_lint` and `conflated_degrade_lint` read it as clean: read
+  as `utf-8`, the mark reached the parser, the parse failed, and the
+  wrapper returned the empty list a clean file returns. So did a NUL byte,
+  and syntax newer than the running Python (a `match` on 3.9). This
+  predates v0.6.0. Source is now read as `utf-8-sig`; a file that still
+  cannot be read or parsed is printed under `NOT JUDGED` with the reason.
+- Exit: 1 on any finding (unjudged files still printed), else 2 if any
+  file was not judged, else 0. A finding outranks an unjudged file, so an
+  unparsable neighbour cannot lower it to a skippable 2. `--update-baseline`
+  over a walk with an unjudged file is refused.
+- Library: `check_source` and `find_conflated_degrades` raise `NotJudged`
+  on source that does not parse, instead of returning `[]`.
+- **Migration: a tree holding a file that does not parse under the
+  guard's Python used to exit 0 and now exits 2, naming the file.** This
+  can turn a CI step red, and that step was not checking that file. Fix
+  the file, take it out of `paths`, or run the guard under a Python that
+  parses it.
+- Legal trees no longer crash or hang the instrument (R24-28): a directory
+  named like `fixtures.py` is a directory, and a symlink loop, a dangling
+  link, or a FIFO named `.py` is listed as not judged. Symlinked directories are still not
+  descended, and are now said (R24-29).
+- New corpus case `swallow-behind-a-byte-order-mark`, whose fences carry
+  the mark; the declared count moves to 56, and 2.9 leaves
+  `corpus/uncovered.json` (14 rules covered, 24 banked).
+
 **A symlink in the pull request cannot turn a finding into a skip**
 (round 24, R24-23, doctrine 2.9).
 

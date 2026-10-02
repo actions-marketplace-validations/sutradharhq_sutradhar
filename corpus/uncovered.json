@@ -4,7 +4,6 @@
   "1.4": "loop queue: dependency failure indistinguishable from success",
   "2.1": "loop queue: fix with no guard in the same commit",
   "2.4": "loop queue: ok status wrapping an error list; confirmation issued on a partial result",
-  "2.9": "loop queue: inconclusive result spelled the same as a pass",
   "3.1": "loop queue: control that renders, accepts input, and changes nothing",
   "3.2": "loop queue: route bouncing to login counted as landed",
   "3.3": "loop queue: route sweep asserting runtime state rather than rendering",
