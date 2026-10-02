@@ -135,16 +135,33 @@ _KEYWORDS_RX = re.compile(r"[A-Za-z][A-Za-z ,]*")
 #: guard returns it: they exit 0, 1 or 2 (EX_SOFTWARE, sysexits.h).
 CRASH_EXIT = 70
 
-#: Runs one guard as `python3 <guard> <args>` would - same argv, same
-#: sys.path[0], `__main__` - and owns the one decision the output cannot be
-#: trusted with: an exception escaping the guard (or a guard file that cannot
-#: be read) prints its traceback to stderr and exits CRASH_EXIT. SystemExit
-#: is the guard's own verdict and passes through untouched.
+#: Every interpreter this driver starts, and the only place one is spelled.
+#: `-I` is isolated mode: no '' (the cwd, which is the adopter's checkout and
+#: so the pull request's tree) on sys.path, no PYTHONPATH, no user site. R24-1
+#: started guards as `python3 -c`, which puts the cwd first on sys.path before
+#: the first line runs, so a `traceback.py` at the root of the pull request
+#: ran inside the adopter's job with its token (R24-22). A class test walks
+#: every subprocess this module starts and refuses one not built here.
+PYTHON = (sys.executable, "-I")
+
+
+def _python(*args: str) -> list:
+    """argv for an isolated interpreter running ``args``."""
+    return [*PYTHON, *args]
+
+
+#: Runs one guard as `python3 <guard> <args>` would - same argv, the guard's
+#: own directory first on sys.path, `__main__` - and owns the one decision
+#: the output cannot be trusted with: an exception escaping the guard (or a
+#: guard file that cannot be read) prints its traceback to stderr and exits
+#: CRASH_EXIT. SystemExit is the guard's own verdict and passes through
+#: untouched. Under -I sys.path[0] is a stdlib entry, so the guard's
+#: directory is inserted before it, never written over it.
 _LAUNCH = (
     "import os, runpy, sys, traceback\n"
     "script = sys.argv[1]\n"
     "sys.argv = sys.argv[1:]\n"
-    "sys.path[0] = os.path.dirname(os.path.abspath(script))\n"
+    "sys.path.insert(0, os.path.dirname(os.path.abspath(script)))\n"
     "try:\n"
     "    runpy.run_path(script, run_name='__main__')\n"
     "except SystemExit:\n"
@@ -359,7 +376,7 @@ def run(cfg: dict, environ: "dict[str, str]") -> int:
             verdict, sentence, output = "cannot-run", pre, pre
         else:
             script = str(GUARDS_DIR / SCRIPTS[guard])
-            cmd = [sys.executable, "-c", _LAUNCH, script, *args]
+            cmd = _python("-c", _LAUNCH, script, *args)
             _say("$ " + " ".join([script, *args]))
             proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
@@ -486,7 +503,7 @@ def selfcheck() -> bool:
                 guard = Path(d) / "absent.py"
             else:
                 guard.write_text(body)
-            proc = subprocess.run([sys.executable, "-c", _LAUNCH, str(guard)],
+            proc = subprocess.run(_python("-c", _LAUNCH, str(guard)),
                                   capture_output=True, text=True)
             if proc.returncode != want:
                 problems.append(f"launcher gave {guard.name} exit "

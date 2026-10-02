@@ -125,7 +125,9 @@ def test_no_hook_runs_a_gate_only_this_repository_can_fail():
 
 def test_the_action_is_composite_and_runs_its_own_driver_with_python3():
     """No Docker, no npm, no install step: a composite action whose one step
-    runs a file that exists in this checkout, from the action's own path.
+    runs a file that exists in this checkout, from the action's own path,
+    in isolated mode (R24-22: nothing on the adopter's PYTHONPATH or user
+    site loads before the driver's first line).
 
     Mutation: rename action/run_guards.py in the `run:` line to run_guard.py - red.
     """
@@ -133,7 +135,7 @@ def test_the_action_is_composite_and_runs_its_own_driver_with_python3():
     assert re.search(r"^runs:\n  using: composite$", text, re.M)
     bodies = [b for _, _, b in csl.steps(text)]
     assert len(bodies) == 1, bodies
-    m = re.fullmatch(r'python3 "\$\{GITHUB_ACTION_PATH\}/([\w/.-]+\.py)"',
+    m = re.fullmatch(r'python3 -I "\$\{GITHUB_ACTION_PATH\}/([\w/.-]+\.py)"',
                      bodies[0].strip())
     assert m, bodies[0]
     assert (REPO / m.group(1)).is_file(), f"{m.group(1)} does not exist"
@@ -435,3 +437,115 @@ def test_the_framework_passes_its_own_action_and_the_baselines_are_why(
     assert bare.returncode == 1, bare.stdout
     assert "swallow: exit 1 -> finding" in bare.stdout
     assert "conflated-degrade: exit 1 -> finding" in bare.stdout
+
+
+# ── R24-22: nothing in the pull request's tree is imported by the driver ────
+
+def test_every_interpreter_the_driver_spells_is_built_isolated():
+    """Class guard, static half: walk run_guards.py's AST. Every subprocess
+    call takes its argv from `_python(...)`, `sys.executable` is spelled
+    nowhere but the PYTHON constant, and PYTHON carries -I. A future spawn
+    that builds its own argv fails here whether or not a test runs it.
+
+    Mutations (each red): `PYTHON = (sys.executable, "-I")` ->
+    `PYTHON = (sys.executable,)`; run()'s `cmd = _python("-c", _LAUNCH,
+    script, *args)` -> `cmd = [sys.executable, "-c", _LAUNCH, script, *args]`.
+    """
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    assert tuple(run_guards.PYTHON) == (sys.executable, "-I")
+    spawns = 0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "subprocess"):
+            spawns += 1
+            first = node.args[0] if node.args else None
+            ok = (isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
+                  and first.func.id == "_python")
+            if isinstance(first, ast.Name):  # `cmd`, built by an assignment
+                assigns = [a for a in ast.walk(tree) if isinstance(a, ast.Assign)
+                           and any(isinstance(t, ast.Name) and t.id == first.id
+                                   for t in a.targets)]
+                ok = bool(assigns) and all(
+                    isinstance(a.value, ast.Call)
+                    and isinstance(a.value.func, ast.Name)
+                    and a.value.func.id == "_python" for a in assigns)
+            assert ok, f"line {node.lineno}: an interpreter not built by _python()"
+    assert spawns >= 2, spawns  # run() and the selfcheck; zero would be vacuous
+    executable_uses = [n.lineno for n in ast.walk(tree)
+                       if isinstance(n, ast.Attribute) and n.attr == "executable"]
+    assert len(executable_uses) == 1, executable_uses  # the PYTHON constant
+
+
+def test_every_interpreter_the_driver_starts_is_isolated(tmp_path, monkeypatch,
+                                                         capsys):
+    """Class guard, runtime half: record the argv of every process the
+    driver actually starts - all six guards and the selfcheck - and require
+    -I on each. What runs is the authority, not what the source spells.
+
+    Mutation: `PYTHON = (sys.executable, "-I")` -> `(sys.executable,)` - red.
+    """
+    seen = []
+    real = subprocess.run
+
+    def recording(argv, *a, **kw):
+        seen.append(list(argv))
+        return real(argv, *a, **kw)
+
+    monkeypatch.setattr(run_guards.subprocess, "run", recording)
+    monkeypatch.chdir(REPO)
+    cfg = run_guards.read_config({
+        "SUTRADHAR_GUARDS": ",".join(run_guards.SCRIPTS),
+        "SUTRADHAR_PATHS": str(CLEAN.relative_to(REPO)),
+        "SUTRADHAR_DESIGN_DIR": "docs/design",
+        "SUTRADHAR_TESTS_DIR": "python/tests"})
+    run_guards.run(cfg, {})
+    assert run_guards.selfcheck()
+    capsys.readouterr()
+    assert len(seen) >= len(run_guards.SCRIPTS) + 3, seen
+    for argv in seen:
+        assert argv[:2] == [sys.executable, "-I"], argv[:3]
+
+
+_SHADOWS = ("traceback", "runpy", "json")
+
+
+def _hostile_tree(root: Path) -> Path:
+    """A pull request's tree: stdlib-shadowing modules at its root, each of
+    which leaves a marker if it is ever imported, and one real swallow."""
+    for name in _SHADOWS:
+        (root / f"{name}.py").write_text(
+            "import os\n"
+            "open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"
+            f" 'PWNED_BY_{name.upper()}'), 'w').write('x')\n")
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text(
+        "def f(s):\n    try:\n        return s.read()\n"
+        "    except Exception:\n        pass\n")
+    return root
+
+
+def test_shadowing_modules_in_the_scanned_tree_never_run_and_the_finding_does(
+        tmp_path):
+    """The behavioural pair, from the pull request's own checkout as cwd,
+    the way a runner starts the action: the shadowing modules are not
+    imported - no marker - while the swallow in the same tree is still
+    reported, so the guards really ran over it.
+
+    Mutation: `PYTHON = (sys.executable, "-I")` -> `(sys.executable,)` -
+    PWNED_BY_TRACEBACK and PWNED_BY_RUNPY appear, red. (json is imported by
+    the guards after the launcher has put their own directory first, so it
+    stays unshadowed either way; it is here for the guards' half.)
+    """
+    tree = _hostile_tree(tmp_path)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SUTRADHAR_", "GITHUB_"))}
+    env.update({"SUTRADHAR_PATHS": "src", "SUTRADHAR_GUARDS": "swallow"})
+    r = subprocess.run([sys.executable, "-I", str(DRIVER)], cwd=tree, env=env,
+                       capture_output=True, text=True, timeout=120)
+    markers = sorted(p.name for p in tree.glob("PWNED_BY_*"))
+    assert markers == [], (markers, r.stdout)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "swallow: exit 1 -> finding" in r.stdout
+    assert "src/app.py" in r.stdout

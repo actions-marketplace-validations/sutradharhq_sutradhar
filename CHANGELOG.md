@@ -50,22 +50,32 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
   path (must be refused, and its command must not have run).
   `python/tests/test_distribution.py` pins the rest offline.
 
-**The pull request under test cannot write the Action's verdict or its
-summary** (round 24, R24-1, doctrine 6.8).
+**The pull request under test cannot write the Action's verdict, its
+summary, or code the Action runs** (round 24, R24-1, R24-22, doctrine 6.8).
 
 - A guard was called crashed whenever the traceback header appeared in its
   output, and that output quotes the pull request - an f-string expression,
   a filename. A file named after the header turned a finding into "crashed
   - the guard failed, not your code", and the step summary carried a live
-  image and link. The verdict is now the exit code alone: each guard runs
-  under a launcher `action/run_guards.py` owns, which turns an exception
-  escaping the guard into exit 70. `classify()` no longer takes the output.
+  image and link. The verdict is now the exit code alone: `classify()` no
+  longer takes the output. Each guard runs under a launcher
+  `action/run_guards.py` owns, which turns an exception escaping the guard
+  into exit 70, a code no guard returns.
+- Every interpreter the Action starts is isolated (`-I`): the driver itself
+  in `action.yml`, and each guard through the one constructor that builds
+  an argv in `run_guards.py`. The first launcher used `python3 -c`, which
+  puts the cwd - the pull request's checkout - first on `sys.path`, so a
+  `traceback.py` at the pull request's root ran in the adopter's job
+  (R24-22, introduced by the R24-1 fix and caught before the tag). A class
+  test walks every interpreter the driver spells and starts and refuses one
+  without `-I`.
 - A guard file that cannot be read is crashed, not "could not run": it
   exited 2 before, and `on-cannot-run: skip` passed it.
 - Adopter-derived text in the step summary is escaped inert (`md_inert`):
   `&`, `<`, `>` as character references, every other ASCII punctuation
   character backslash-escaped, line breaks flattened. No tag, link, image,
-  emphasis, autolink or table break survives.
+  emphasis, autolink or table break survives in CommonMark or GFM; GitHub's
+  own mention and issue linking after render is not covered (R24-25).
 
 **"Deleting a corpus case fails the run" is now true** (round 24, R24-2,
 doctrine 3.7).

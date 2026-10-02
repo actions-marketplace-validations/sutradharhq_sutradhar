@@ -113,4 +113,4 @@ runs:
         SUTRADHAR_DESIGN_DIR: ${{ inputs.design-dir }}
         SUTRADHAR_TESTS_DIR: ${{ inputs.tests-dir }}
         SUTRADHAR_ROUNDS_DIR: ${{ inputs.rounds-dir }}
-      run: python3 "${GITHUB_ACTION_PATH}/action/run_guards.py"
+      run: python3 -I "${GITHUB_ACTION_PATH}/action/run_guards.py"
