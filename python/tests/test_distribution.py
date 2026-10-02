@@ -549,3 +549,37 @@ def test_shadowing_modules_in_the_scanned_tree_never_run_and_the_finding_does(
     assert r.returncode == 1, r.stdout + r.stderr
     assert "swallow: exit 1 -> finding" in r.stdout
     assert "src/app.py" in r.stdout
+
+
+def test_a_symlinked_conflation_fails_the_action_even_under_skip(tmp_path):
+    """R24-23 at the Action's seam, from the pull request's checkout as cwd:
+    a symlink to a conflated file used to make conflated-degrade exit 2, and
+    `on-cannot-run: skip` turned that into "3 guard(s) passed, 1 skipped",
+    exit 0. The driver still classifies by exit code alone (R24-1); the fix
+    is in the lint. Pair: the same tree without the link is red too.
+
+    Mutation: conflated_degrade_lint's `if target in seen: continue` ->
+    `if False: continue` - exit 0, red.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "reader.py").write_text(
+        "def read(store):\n    try:\n        return store.get()\n"
+        "    except KeyError:\n        print('failed')\n        return {}\n"
+        "    if not store:\n        return {}\n    return store.get()\n")
+    (src / "link.py").symlink_to("reader.py")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SUTRADHAR_", "GITHUB_"))}
+    env.update({"SUTRADHAR_PATHS": "src", "SUTRADHAR_ON_CANNOT_RUN": "skip"})
+
+    def act():
+        return subprocess.run([sys.executable, "-I", str(DRIVER)], cwd=tmp_path,
+                              env=env, capture_output=True, text=True,
+                              timeout=120)
+
+    r = act()
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "conflated-degrade: exit 1 -> finding" in r.stdout, r.stdout
+    (src / "link.py").unlink()
+    r = act()
+    assert r.returncode == 1, r.stdout

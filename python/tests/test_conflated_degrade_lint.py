@@ -352,3 +352,72 @@ def test_a_blinded_internal_reddens_the_selfcheck(monkeypatch, name, vacuous):
     without the selfcheck saying so."""
     monkeypatch.setattr(cdl, name, vacuous)
     assert not cdl.selfcheck()
+
+
+# ── R24-23: a file reached twice through a symlink is read once ─────────────
+#
+# Keys resolve symlinks, so a link to a file holding a conflation produced
+# the same key twice: "INSTRUMENT ERROR: duplicate key(s)", exit 2, and under
+# the Action's `on-cannot-run: skip` a pass. Run from inside the tree, as the
+# Action runs, because that is where the keys collide.
+
+_CONFLATED = (
+    "def read(store):\n"
+    "    try:\n"
+    "        return store.get()\n"
+    "    except KeyError:\n"
+    "        print('failed')\n"
+    "        return {}\n"
+    "    if not store:\n"
+    "        return {}\n"
+    "    return store.get()\n"
+)
+
+
+def _linked_tree(root: Path) -> Path:
+    src = root / "src"
+    src.mkdir()
+    (src / "reader.py").write_text(_CONFLATED)
+    (src / "link.py").symlink_to("reader.py")
+    return src
+
+
+def test_a_symlink_to_a_conflated_file_is_a_finding_not_could_not_run(
+        tmp_path, monkeypatch, capsys):
+    """The pair: the link and its target are one file, so the conflation is
+    one finding at exit 1, the same verdict as the tree without the link.
+
+    Mutation (the line that runs, in _read_once): `if target in seen:
+    continue` -> `if False: continue` - duplicate key, exit 2, red.
+    """
+    _linked_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cdl.main(["src", "--baseline", "none.json"]) == 1
+    out = capsys.readouterr()
+    assert "duplicate key" not in out.err, out.err
+    assert out.out.count("src/reader.py:") == 1, out.out
+    (tmp_path / "src" / "link.py").unlink()
+    assert cdl.main(["src", "--baseline", "none.json"]) == 1
+
+
+def test_a_symlink_out_of_the_scanned_paths_is_skipped_and_said(
+        tmp_path, monkeypatch, capsys):
+    """Skipped and counted, not followed: the scanned paths are the adopter's
+    statement of what their source is. The target named directly is still
+    read and still found (the pair).
+
+    Mutation (the line that runs, in _read_once): `if is_link and not
+    any(...)` -> `if False` - the far file is read through the link and its
+    conflation fails the clean tree, red.
+    """
+    far = tmp_path / "elsewhere"
+    far.mkdir()
+    (far / "far.py").write_text(_CONFLATED)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("x = 1\n")
+    (src / "out.py").symlink_to(far / "far.py")
+    monkeypatch.chdir(tmp_path)
+    assert cdl.main(["src", "--baseline", "none.json"]) == 0
+    assert "skipped 1 symlinked file(s)" in capsys.readouterr().out
+    assert cdl.main(["elsewhere", "--baseline", "none.json"]) == 1

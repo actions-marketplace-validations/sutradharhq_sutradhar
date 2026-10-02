@@ -228,3 +228,22 @@ def test_a_sparql_block_built_with_format_is_seen():
     )
     hits = check_source(src, SPARQL)
     assert len(hits) == 1 and hits[0][1] == "tenant"
+
+
+def test_a_file_and_a_symlink_to_it_report_once(tmp_path, monkeypatch, capsys):
+    """R24-23: the same interpolation reached through a link and its target
+    was reported twice. One file, one finding; still exit 1.
+
+    Mutation: `if target in seen: continue` -> `if False: continue` in
+    _read_once - two report lines, red.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text(
+        "def q(x):\n    return f\"SELECT * FROM t WHERE a = '{x}'\"\n")
+    (src / "link.py").symlink_to("a.py")
+    monkeypatch.chdir(tmp_path)
+    assert main(["src"]) == 1
+    out = capsys.readouterr().out
+    assert "1 query interpolation risk(s)" in out, out
+    assert "src/a.py:2" in out and "link.py" not in out, out

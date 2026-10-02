@@ -350,6 +350,34 @@ def _selfcheck_body() -> bool:
                 f"would be refusing everything: {said!r}"
             )
 
+    # R24-23, in a pair: a file and a symlink to it are read once, so one
+    # conflation is one finding (twice was a duplicate key, exit 2, and a
+    # pass under the Action's skip); a link out of the scanned directory is
+    # skipped and counted; the target alone is still found.
+    with tempfile.TemporaryDirectory() as td:
+        inside, elsewhere = Path(td) / "src", Path(td) / "elsewhere"
+        inside.mkdir()
+        elsewhere.mkdir()
+        (inside / "reader.py").write_text(_BAD, encoding="utf-8")
+        (elsewhere / "far.py").write_text(_BAD, encoding="utf-8")
+        try:
+            (inside / "link.py").symlink_to(inside / "reader.py")
+            (inside / "out.py").symlink_to(elsewhere / "far.py")
+            linked = True
+        except OSError:
+            linked = False  # no symlinks on this filesystem: nothing to pin
+        if linked:
+            got, files, _, outside = scan([inside])
+            if len(files) != 1 or len(got) != 1 or outside != 1:
+                problems.append(
+                    f"a file and a symlink to it, plus a link out of the "
+                    f"scan: read {len(files)} file(s) for {len(got)} "
+                    f"finding(s), {outside} skipped - expected 1, 1, 1"
+                )
+            got, files, _, _ = scan([inside / "reader.py"])
+            if len(got) != 1:
+                problems.append("the symlink's target alone lost its finding")
+
     bad = find_conflated_degrades(_BAD)
     if not bad:
         problems.append("a handler returning the same {} as the empty path "
@@ -398,7 +426,9 @@ def _selfcheck_body() -> bool:
             "(value, ok) passed, re-raise passed, keys unchanged by lines "
             "inserted above them, new conflation reported, separated entry "
             "reported for banking, same-named defs keyed apart, a directory "
-            "with no Python file refused with exit 2, one clean file passed"
+            "with no Python file refused with exit 2, one clean file passed, "
+            "a file and its symlink read once and a link out of the scan "
+            "skipped"
         )
     return not problems
 
@@ -428,25 +458,62 @@ def _is_vendor(path: Path, root: Path) -> bool:
     )
 
 
+def _read_once(named: list, walked: list, roots: list) -> tuple:
+    """(files to read, symlinks skipped because they leave the scan).
+
+    A file reached twice - a symlink and its target, or two overlapping
+    paths - is read once (R24-23). Read twice, its findings arrived twice,
+    and in conflated_degrade_lint the duplicate key was an exit 2 that the
+    Action's `on-cannot-run: skip` turned into a pass. Real files are taken
+    before links, so a finding carries the file's own name. Files named on
+    the command line are read as named. A symlinked file found by walking a
+    directory, whose target lies outside every directory scanned, is
+    skipped and counted rather than followed: the paths are the adopter's
+    statement of what their source is, and a link out of them would let the
+    tree under review choose what gets read.
+    """
+    dirs = [r.resolve() for r in roots if r.is_dir()]
+    links = [f for f in walked if f.is_symlink()]
+    ordered = ([(f, False) for f in named]
+               + [(f, False) for f in walked if not f.is_symlink()]
+               + [(f, True) for f in links])
+    out: list = []
+    seen: set = set()
+    outside = 0
+    for f, is_link in ordered:
+        target = f.resolve()
+        if is_link and not any(target == d or d in target.parents for d in dirs):
+            outside += 1
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        out.append(f)
+    return out, outside
+
+
 def scan(paths: list, include_vendor: bool = False) -> tuple:
-    """(findings, files read, files skipped as vendor)."""
+    """(findings, files read, files skipped as vendor, symlinks skipped as
+    leaving the scanned paths)."""
     found: list = []
-    files: list = []
+    named: list = []
+    walked: list = []
     skipped = 0
     for root in paths:
         if root.is_file() and root.suffix == ".py":
-            files.append(root)
+            named.append(root)
             continue
         for f in sorted(root.rglob("*.py")):
             if not include_vendor and _is_vendor(f, root):
                 skipped += 1
                 continue
-            files.append(f)
+            walked.append(f)
+    files, outside = _read_once(named, walked, paths)
     for f in files:
         found.extend(find_conflated_degrades(
             f.read_text(encoding="utf-8", errors="replace"), _rel(f)
         ))
-    return found, files, skipped
+    return found, files, skipped, outside
 
 
 _KNOWN_FLAGS = {
@@ -502,7 +569,13 @@ def main(argv: "list | None" = None) -> int:
     if not selfcheck():
         return 1
 
-    found, files, skipped = scan(paths, include_vendor)
+    found, files, skipped, outside = scan(paths, include_vendor)
+    if outside:
+        print(
+            f"[conflated-degrade-lint] skipped {outside} symlinked file(s) "
+            f"whose target is outside the scanned path(s); name the target's "
+            f"directory to scan it"
+        )
 
     # Say what was NOT read. An exclusion the operator cannot see is the same
     # class of lie this guard exists to catch.

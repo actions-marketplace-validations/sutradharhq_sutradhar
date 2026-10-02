@@ -464,6 +464,40 @@ def _selfcheck_body() -> bool:
 _KNOWN_FLAGS = {"--allowlist", "--keywords", "--safe-call", "--selfcheck", "--strict", "--help", "-h"}
 
 
+def _read_once(named: list, walked: list, roots: list) -> tuple:
+    """(files to read, symlinks skipped because they leave the scan).
+
+    A file reached twice - a symlink and its target, or two overlapping
+    paths - is read once (R24-23). Read twice, its findings arrived twice,
+    and in conflated_degrade_lint the duplicate key was an exit 2 that the
+    Action's `on-cannot-run: skip` turned into a pass. Real files are taken
+    before links, so a finding carries the file's own name. Files named on
+    the command line are read as named. A symlinked file found by walking a
+    directory, whose target lies outside every directory scanned, is
+    skipped and counted rather than followed: the paths are the adopter's
+    statement of what their source is, and a link out of them would let the
+    tree under review choose what gets read.
+    """
+    dirs = [r.resolve() for r in roots if r.is_dir()]
+    links = [f for f in walked if f.is_symlink()]
+    ordered = ([(f, False) for f in named]
+               + [(f, False) for f in walked if not f.is_symlink()]
+               + [(f, True) for f in links])
+    out: list = []
+    seen: set = set()
+    outside = 0
+    for f, is_link in ordered:
+        target = f.resolve()
+        if is_link and not any(target == d or d in target.parents for d in dirs):
+            outside += 1
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        out.append(f)
+    return out, outside
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
@@ -507,14 +541,22 @@ def main(argv: list[str] | None = None) -> int:
     if not selfcheck():
         return 1
 
-    py_files: list[Path] = []
+    named: list[Path] = []
+    walked: list[Path] = []
     for root in paths:
         if root.is_file() and root.suffix == ".py":
-            py_files.append(root)
+            named.append(root)
         else:
-            py_files.extend(
+            walked.extend(
                 f for f in root.rglob("*.py") if "__pycache__" not in str(f)
             )
+    py_files, outside = _read_once(named, walked, paths)
+    if outside:
+        print(
+            f"[interpolation-lint] skipped {outside} symlinked file(s) whose "
+            f"target is outside the scanned path(s); name the target's "
+            f"directory to scan it"
+        )
 
     # Zero files read is "could not measure", never "no injection risk"
     # (2.9). Refused with the paths named and the sentence that says what to

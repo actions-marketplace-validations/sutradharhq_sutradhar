@@ -266,6 +266,40 @@ def _rel(p: Path) -> str:
         return str(p)
 
 
+def _read_once(named: list, walked: list, roots: list) -> tuple:
+    """(files to read, symlinks skipped because they leave the scan).
+
+    A file reached twice - a symlink and its target, or two overlapping
+    paths - is read once (R24-23). Read twice, its findings arrived twice,
+    and in conflated_degrade_lint the duplicate key was an exit 2 that the
+    Action's `on-cannot-run: skip` turned into a pass. Real files are taken
+    before links, so a finding carries the file's own name. Files named on
+    the command line are read as named. A symlinked file found by walking a
+    directory, whose target lies outside every directory scanned, is
+    skipped and counted rather than followed: the paths are the adopter's
+    statement of what their source is, and a link out of them would let the
+    tree under review choose what gets read.
+    """
+    dirs = [r.resolve() for r in roots if r.is_dir()]
+    links = [f for f in walked if f.is_symlink()]
+    ordered = ([(f, False) for f in named]
+               + [(f, False) for f in walked if not f.is_symlink()]
+               + [(f, True) for f in links])
+    out: list = []
+    seen: set = set()
+    outside = 0
+    for f, is_link in ordered:
+        target = f.resolve()
+        if is_link and not any(target == d or d in target.parents for d in dirs):
+            outside += 1
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+        out.append(f)
+    return out, outside
+
+
 def _is_vendor(path: Path, root: Path) -> bool:
     """True when ``path`` sits under a vendor directory BELOW ``root``.
 
@@ -328,17 +362,25 @@ def main(argv: list[str] | None = None) -> int:
     if not selfcheck():
         return 1
 
-    py_files: list[Path] = []
+    named: list[Path] = []
+    walked: list[Path] = []
     skipped_vendor = 0
     for root in paths:
         if root.is_file() and root.suffix == ".py":
-            py_files.append(root)
+            named.append(root)
             continue
         for f in root.rglob("*.py"):
             if not include_vendor and _is_vendor(f, root):
                 skipped_vendor += 1
                 continue
-            py_files.append(f)
+            walked.append(f)
+    py_files, outside = _read_once(named, walked, paths)
+    if outside:
+        print(
+            f"[swallow-lint] skipped {outside} symlinked file(s) whose target "
+            f"is outside the scanned path(s); name the target's directory to "
+            f"scan it"
+        )
 
     # Say what was NOT read. An exclusion the operator cannot see is the same
     # class of lie the guard exists to catch: "OK" over an unscanned tree.

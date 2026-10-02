@@ -273,3 +273,21 @@ def test_vendor_list_excludes_dirs_that_are_often_real_source():
     `dist` and `env` are real package names in real projects."""
     for risky in ("build", "dist", "env", "src", "app", "lib", "test", "tests"):
         assert risky not in VENDOR_DIRS, risky
+
+
+def test_a_file_and_a_symlink_to_it_are_read_once(tmp_path, monkeypatch,
+                                                   capsys):
+    """R24-23, kept consistent with conflated_degrade_lint: the swallow is
+    one finding and the tree is one file, not two.
+
+    Mutation: `if target in seen: continue` -> `if False: continue` in
+    _read_once - "2 files", red.
+    """
+    from sutradhar_guards.swallow_lint import main
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.py").write_text("x = 1\n")
+    (src / "link.py").symlink_to("a.py")
+    monkeypatch.chdir(tmp_path)
+    assert main(["src", "--baseline", "none.json"]) == 0
+    assert "OK (1 files" in capsys.readouterr().out

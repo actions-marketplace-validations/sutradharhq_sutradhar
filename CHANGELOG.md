@@ -77,6 +77,18 @@ summary, or code the Action runs** (round 24, R24-1, R24-22, doctrine 6.8).
   emphasis, autolink or table break survives in CommonMark or GFM; GitHub's
   own mention and issue linking after render is not covered (R24-25).
 
+**A symlink in the pull request cannot turn a finding into a skip**
+(round 24, R24-23, doctrine 2.9).
+
+- A file symlink to a conflated file gave `conflated_degrade_lint` the same
+  key twice, an exit 2 instrument error, and under `on-cannot-run: skip` an
+  Action run that passed. `swallow_lint`, `interpolation_lint` and
+  `conflated_degrade_lint` now read a file reached twice - through a link
+  and its target, or overlapping paths - once. A symlinked file whose
+  target is outside every scanned directory is skipped and counted on a
+  printed line, not followed. Interpolation findings reached through a
+  link are no longer reported twice. Same paths, same verdicts otherwise.
+
 **"Deleting a corpus case fails the run" is now true** (round 24, R24-2,
 doctrine 3.7).
 
