@@ -88,7 +88,12 @@ jobs:
         # yielded "6 of 6" and exit 0. The corpus takes its denominator from
         # the manifest set on disk; this step runs the full scorer with the
         # archive flags so scars and rule ids resolve, not just parse.
-        run: python python/sutradhar_guards/corpus.py corpus/ --rounds docs/rounds/ --backflow docs/backflow.md
+        # R24-2: a denominator read off the disk shrinks with the disk - a
+        # deleted case printed "51 of 51" and passed. corpus/case_count.json
+        # declares the total and this step fails unless exactly that many
+        # cases load; --require-case-count makes deleting the declaration
+        # itself an exit 2.
+        run: python python/sutradhar_guards/corpus.py corpus/ --rounds docs/rounds/ --backflow docs/backflow.md --require-case-count
       - name: verify-guard selfcheck (a decorative guard must be caught)
         # Builds real repos with a real guard and a deliberately decorative
         # one and requires the tool to tell them apart. A verifier that
@@ -158,6 +163,21 @@ jobs:
         uses: ./
         with:
           paths: python/tests/fixtures/action-clean
+      # (b2) R24-4: the framework passes its own action. Run with only the
+      # defaults it went red on this repository - selfcheck handlers read as
+      # swallows, two conflations - and an adopter's first look at the repo
+      # would have been a red badge from its own guard. Each finding was
+      # fixed or banked with a reason (docs/rounds/round-024.md); the banked
+      # ones live in .github/sutradhar/, never in a weakened lint rule.
+      # examples/ is deliberately broken code and is not scanned; corpus/
+      # case bodies are markdown. python/tests/test_distribution.py reads
+      # this step's inputs and runs them offline.
+      - name: Action over this framework's own source (must pass)
+        uses: ./
+        with:
+          paths: action plugin python
+          swallow-baseline: .github/sutradhar/swallow_baseline.json
+          conflated-degrade-baseline: .github/sutradhar/conflated_degrade_baseline.json
       # (c) A tree with no Python file, default on-cannot-run (`fail`): an
       # exit 2 must fail the job, never read as a pass (2.9).
       - name: Action over a tree with no Python (must go red by default)

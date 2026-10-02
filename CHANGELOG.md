@@ -30,9 +30,9 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
   because a green job over a guard that read nothing is the R21-2 lie one
   level up; `skip` makes each one a named skip (the guard's own sentence,
   a warning annotation, a step-summary row), and a run where every guard
-  was skipped fails anyway. A guard whose output carries a traceback, or
-  that exits anything but 0/1/2, is reported as crashed - the instrument's
-  failure, not a finding (6.8, 6.11). Guard output is fenced with
+  was skipped fails anyway. A guard that raises, or that exits anything but
+  0/1/2, is reported as crashed - the instrument's failure, not a finding
+  (6.8, 6.11); see R24-1 below for how that is decided. Guard output is fenced with
   `::stop-commands::`, so a line of the adopter's source quoted in a
   finding cannot speak to the runner.
 - `.pre-commit-hooks.yaml`: `sutradhar-swallow`, `sutradhar-interpolation`,
@@ -49,6 +49,66 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
   under `fail` (must fail) and `skip` (must pass), and an injection-shaped
   path (must be refused, and its command must not have run).
   `python/tests/test_distribution.py` pins the rest offline.
+
+**The pull request under test cannot write the Action's verdict or its
+summary** (round 24, R24-1, doctrine 6.8).
+
+- A guard was called crashed whenever the traceback header appeared in its
+  output, and that output quotes the pull request - an f-string expression,
+  a filename. A file named after the header turned a finding into "crashed
+  - the guard failed, not your code", and the step summary carried a live
+  image and link. The verdict is now the exit code alone: each guard runs
+  under a launcher `action/run_guards.py` owns, which turns an exception
+  escaping the guard into exit 70. `classify()` no longer takes the output.
+- A guard file that cannot be read is crashed, not "could not run": it
+  exited 2 before, and `on-cannot-run: skip` passed it.
+- Adopter-derived text in the step summary is escaped inert (`md_inert`):
+  `&`, `<`, `>` as character references, every other ASCII punctuation
+  character backslash-escaped, line breaks flattened. No tag, link, image,
+  emphasis, autolink or table break survives.
+
+**"Deleting a corpus case fails the run" is now true** (round 24, R24-2,
+doctrine 3.7).
+
+- It was claimed in `corpus/README.md` and by a test name, and a deleted case
+  printed "51 of 51" and exited 0 - R22-1 one level down. `corpus/case_count.json`
+  declares the total; a full run exits 1 unless exactly that many cases load,
+  naming the shortfall or the excess. Symmetric and never rewritten by a
+  tool, the dialect of `uncovered.json`. A malformed declaration exits 2.
+- `--require-case-count` makes a missing declaration exit 2; the CI corpus
+  step passes it. The test is renamed
+  `test_deleting_a_case_file_fails_against_the_declared_count` and asserts
+  the failure, with the pair. `corpus.py`'s selfcheck carries both pairs.
+
+**The framework passes its own Action** (round 24, R24-3 to R24-6, R24-8;
+doctrine 6.1, 2.7).
+
+- Run with its defaults on this repository, the Action was red on swallow
+  and conflated-degrade. Each finding was read. `mcp_server._json_verdict`
+  conflated "printed no JSON" with "printed JSON that would not parse" and
+  now returns the reason with the None (R24-3). The selfcheck wrappers that
+  print `SELFCHECK FAILED` and return False (R24-8), `handle_line`'s
+  notification branch (R24-5) and `detectors._module_exports` (R24-6) are
+  explicit degradations, banked with reasons in `.github/sutradhar/` - no
+  lint rule changed for any adopter.
+- New step in the selftest `action` job: `uses: ./` over `action plugin
+  python` with those baselines, which must pass. `examples/` is broken on
+  purpose and not scanned. `test_distribution.py` reads that step's inputs
+  from the workflow and runs them offline as a pair.
+
+**The pipe check reads a case pattern and a `[[ ]]` test as shell, not as
+pipes** (round 24, R24-7, doctrine 6.3).
+
+- `case "$X" in a|b) ...;;` and `[[ "$REF" =~ ^(main|release/.*)$ ]]` were
+  flagged as pipes that swallow an exit code. A `|` inside `[[ ... ]]` and
+  a case pattern list's alternation bars are no longer read as pipes; the
+  case state crosses the lines of a step. `|&`, a pipe after pipefail is
+  switched off, a pipe in a case clause's command, and a pipe after `]]`
+  are all still flagged. Pairs in the tests and the selfcheck; new corpus
+  case `ci-pipe-case-pattern-and-regex` (the declared count moves to 55).
+
+**`CITATION.cff`** carries v0.6.0's release date, 2026-10-02; it had
+v0.5.2's.
 
 **`ci_step_lint.py` refuses a pipe that swallows an exit code** (round 23,
 R22-3 closed, doctrine 6.3).

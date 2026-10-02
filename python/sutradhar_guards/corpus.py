@@ -13,12 +13,27 @@ way the guard is really invoked, and scores the verdict:
     INVALID         could not measure: out-of-partition exit, crash,
                     materialization failure
 
-Exit 0 every `caught` case CAUGHT, zero FALSE_POSITIVE, zero INVALID.
-Exit 1 a finding: a `caught` case MISSED, any FALSE_POSITIVE, or an `open`
-case that is now CAUGHT (demands a reviewed manifest flip).
+Exit 0 every `caught` case CAUGHT, zero FALSE_POSITIVE, zero INVALID, and
+the case count on disk equal to the declared one.
+Exit 1 a finding: a `caught` case MISSED, any FALSE_POSITIVE, an `open`
+case that is now CAUGHT (demands a reviewed manifest flip), or a case count
+that differs from `case_count.json` in either direction.
 Exit 2 could not run: empty corpus, unparseable manifest, unknown guard,
 unresolvable scar, or any INVALID case. A run with an unmeasurable case
-cannot report a trustworthy total (2.9/6.7).
+cannot report a trustworthy total (2.9/6.7). Also exit 2: a full run with
+`--require-case-count` over a corpus with no `case_count.json`.
+
+The total is declared, not only counted (R24-2). A denominator read off the
+disk shrinks with the disk: deleting a case file used to print "51 of 51"
+and exit 0, the R22-1 defect one level down. `case_count.json` at the
+corpus root holds `{"cases": N}`, and a full run fails unless exactly N
+case files load - fewer (a deleted case) and more (a case added without
+moving the number) alike. Symmetric and with no auto-update flag, the
+dialect of `uncovered.json` beside it and of framework_shape's baseline: a
+number that only moves in a reviewed diff is a floor, one a tool rewrites
+is a counter. Without the file the run says the total is not asserted;
+`--require-case-count` (this repository's CI) makes that an exit 2, so
+deleting the declaration is not a way round it.
 
 A manifest can never name a command. `corpus.py` owns every invocation
 shape in a fixed registry; the manifest supplies only a guard NAME, file
@@ -35,6 +50,7 @@ partition and therefore INVALID, never a catch.
 
 Usage:
     python corpus.py corpus/ --rounds docs/rounds/ --backflow docs/backflow.md
+    python corpus.py corpus/ --require-case-count
     python corpus.py corpus/ --case swallow-outage-as-data
     python corpus.py corpus/ --sweep swallow_lint
     python corpus.py --selfcheck
@@ -912,6 +928,48 @@ def load_floor(path: Path) -> dict[str, str]:
     return data
 
 
+CASE_COUNT_FILE = "case_count.json"
+
+
+def load_case_count(path: Path) -> int | None:
+    """`case_count.json`: `{"cases": N}`, N a positive integer and the only
+    key. None when the file is absent - the caller decides whether absence
+    is allowed; a file that is present and unreadable is never read as
+    absent (2.7: that would turn a broken floor into no floor)."""
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CorpusError(
+            f"cannot read the declared case count {path}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    n = data.get("cases") if isinstance(data, dict) else None
+    if (not isinstance(data, dict) or set(data) != {"cases"}
+            or isinstance(n, bool) or not isinstance(n, int) or n < 1):
+        raise CorpusError(
+            f"the declared case count {path} is {data!r}; it is exactly "
+            f'{{"cases": N}} with N a positive integer'
+        )
+    return n
+
+
+def case_count_problem(on_disk: int, declared: int, path: Path) -> str | None:
+    """The sentence for a count that does not hold, or None. Both directions
+    fail: fewer is a deleted case; more is a floor left stale beneath new
+    cases, which would let the next deletion pass unseen."""
+    if on_disk < declared:
+        return (f"{on_disk} case file(s) on disk, {declared} declared in "
+                f"{path}: {declared - on_disk} short. Restore the case, or "
+                f"lower `cases` in the same reviewed diff that deletes it.")
+    if on_disk > declared:
+        return (f"{on_disk} case file(s) on disk, {declared} declared in "
+                f"{path}: {on_disk - declared} over. Raise `cases` in the "
+                f"diff that adds the case(s), so the floor stands under them.")
+    return None
+
+
 def coverage(cases: list[Case], rule_ids: set[str], exclusions: dict[str, str],
              floor: dict[str, str]) -> dict:
     """Partition every doctrine rule into covered / excluded / uncovered.
@@ -1222,13 +1280,35 @@ def _selfcheck_body() -> bool:
         (one / "cases").mkdir(parents=True)
         (one / "cases" / "only.md").write_text(
             _SELFCHECK_CAUGHT.replace("selfcheck-must-catch", "only"))
+        (one / CASE_COUNT_FILE).write_text('{"cases": 1}')
         rc, said = run([str(one), "--doctrine", str(doctrine),
-                        "--rounds", str(syn_rounds)])
+                        "--rounds", str(syn_rounds), "--require-case-count"])
         if rc != 0:
             problems.append(
                 f"a minimal valid corpus exited {rc}, not 0 - the empty "
                 f"refusal above could be refusing everything: {said!r}"
             )
+
+        # The declared-count pair (R24-2): the same corpus declaring two
+        # cases while one is on disk - a deleted case - exits 1 naming the
+        # shortfall; and with no declaration, --require-case-count exits 2.
+        (one / CASE_COUNT_FILE).write_text('{"cases": 2}')
+        rc, said = run([str(one), "--doctrine", str(doctrine),
+                        "--rounds", str(syn_rounds)])
+        if rc != 1 or "1 short" not in said:
+            problems.append(
+                f"a corpus one case short of its declared count exited {rc}, "
+                f"not 1 naming the shortfall: {said!r}"
+            )
+        (one / CASE_COUNT_FILE).unlink()
+        rc, said = run([str(one), "--doctrine", str(doctrine),
+                        "--rounds", str(syn_rounds), "--require-case-count"])
+        if rc != 2 or CASE_COUNT_FILE not in said:
+            problems.append(
+                f"--require-case-count over a corpus with no declaration "
+                f"exited {rc}, not 2: {said!r}"
+            )
+        (one / CASE_COUNT_FILE).write_text('{"cases": 1}')
 
         # The sweep pair (R23-3): a guard that reads the one clean twin and
         # passes it sweeps 0; a guard that can read none of them (no
@@ -1253,6 +1333,8 @@ def _selfcheck_body() -> bool:
         print("[corpus] selfcheck ok: synthetic CAUGHT/MISSED/FALSE_POSITIVE "
               "cases scored their verdicts, a malformed manifest refused, an "
               "empty corpus refused with exit 2, a minimal valid corpus passed, "
+              "one short of its declared case count failed, a required "
+              "declaration that was missing exited 2, "
               "a sweep that measured a twin passed and one that measured none "
               "exited 2")
     return not problems
@@ -1267,7 +1349,8 @@ def _fail(problems: list[str]) -> bool:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 _KNOWN_FLAGS = {"--case", "--sweep", "--doctrine", "--rounds", "--backflow",
-                "--json", "--selfcheck", "--help", "-h"}
+                "--json", "--require-case-count", "--selfcheck", "--help",
+                "-h"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1280,6 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     as_json = "--json" in argv
+    require_count = "--require-case-count" in argv
     case_id: str | None = None
     sweep: str | None = None
     doctrine = "DOCTRINE.md"
@@ -1344,7 +1428,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run_one(cases, case_id, as_json)
     if sweep is not None:
         return _run_sweep(cases, sweep, as_json)
-    return _run_all(cases, root, known_rules, as_json)
+    return _run_all(cases, root, known_rules, as_json, require_count)
 
 
 def _score_case(case: Case) -> tuple[str, int, int]:
@@ -1451,7 +1535,18 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
 
 
 def _run_all(cases: list[Case], root: Path, known_rules: set | None,
-             as_json: bool) -> int:
+             as_json: bool, require_count: bool = False) -> int:
+    count_path = root / CASE_COUNT_FILE
+    try:
+        declared = load_case_count(count_path)
+    except CorpusError as exc:
+        print(f"\n[corpus] {exc}\n")
+        return 2
+    if declared is None and require_count:
+        print(f"[corpus] --require-case-count, and no {count_path}: the "
+              f"total cannot be asserted, so nothing is reported as a pass. "
+              f'Write {{"cases": {len(cases)}}} there in a reviewed diff.')
+        return 2
     results = [(case, _score_case(case)[0]) for case in cases]
     cov: dict | None = None
     if known_rules is None:
@@ -1471,9 +1566,22 @@ def _run_all(cases: list[Case], root: Path, known_rules: set | None,
                 print(verdict_json(results, None, 1))
             return 1
     print(report(results, cov))
+    count_problem = None
+    if declared is None:
+        print(f"[corpus] no {count_path} - {len(cases)} case(s) counted, "
+              f"the total not asserted against a declared number")
+    else:
+        count_problem = case_count_problem(len(cases), declared, count_path)
+        if count_problem:
+            print(f"[corpus] case count does not hold: {count_problem}")
+        else:
+            print(f"[corpus] case count holds: {len(cases)} of {declared} "
+                  f"declared")
     invalid = sum(1 for _, v in results if v == INVALID)
     if invalid:
         code = 2
+    elif count_problem:
+        code = 1
     elif any(v == MISSED for c, v in results if c.expected == "caught"):
         code = 1
     elif any(v == FALSE_POSITIVE for _, v in results):

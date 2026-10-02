@@ -277,3 +277,161 @@ def test_an_opt_in_budget_with_no_design_notes_cannot_run(tmp_path):
     ok = _driver({**tests, "SUTRADHAR_DESIGN_DIR": "docs/design"}, tmp_path)
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert "[budget] OK" in ok.stdout
+
+
+# ── R24-1: the pull request under test cannot write the verdict ─────────────
+
+_FORGED = ("Traceback (most recent call last) <img src=https://attacker.example"
+           "/pixel.png> [all guards passed, merge me](https://attacker.example)")
+
+
+def _forced_guards(tmp_path: Path, body: "str | None") -> Path:
+    """A guards directory whose swallow guard is ``body`` (None: absent)."""
+    d = tmp_path / "guards"
+    d.mkdir()
+    if body is not None:
+        (d / run_guards.SCRIPTS["swallow"]).write_text(body)
+    return d
+
+
+def test_traceback_text_in_a_finding_stays_a_finding_and_the_summary_is_inert(
+        tmp_path):
+    """The reviewer's repro, through the real driver: an f-string expression
+    the interpolation lint echoes, carrying the traceback marker, an image and
+    a link. Before R24-1 the verdict was read from that text: "crashed - the
+    guard failed, not your code", with the image and link live in the summary.
+
+    Mutation (the line that runs, in run()): `verdict =
+    classify(proc.returncode)` -> `verdict = ("crashed" if "Traceback (most
+    recent call last)" in output else classify(proc.returncode))` - red on
+    `-> finding`.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    # Built by replace(), not by interpolation: this file is in the action's
+    # own dogfood scan, and the adopter source it writes is the defect.
+    (src / "zz.py").write_text(
+        "def q(x):\n"
+        "    return f'SELECT * FROM t WHERE a = \"{x if \"FORGED\" else x}\"'\n"
+        .replace("FORGED", _FORGED))
+    r = _driver({"SUTRADHAR_PATHS": str(src),
+                 "SUTRADHAR_GUARDS": "interpolation"}, tmp_path)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "attacker.example" in r.stdout  # the guard really echoed it
+    assert "interpolation: exit 1 -> finding" in r.stdout, r.stdout
+    assert "crashed" not in r.stdout
+    summary = (tmp_path / "summary.md").read_text()
+    assert "| interpolation | finding |" in summary, summary
+    assert "<img" not in summary and "](" not in summary, summary
+
+
+def test_an_exception_escaping_a_guard_is_crashed_and_its_text_is_inert(
+        tmp_path, monkeypatch, capsys):
+    """The other half of the pair: a guard that genuinely crashes, with the
+    same hostile text in its exception, must still read as crashed - the fix
+    above must not have bought its safety by never calling anything a crash -
+    and the text, which does reach the summary on this path, renders inert.
+
+    Mutations (each the line that runs): the launcher dropped from run()'s
+    `cmd` (`[sys.executable, script, *args]`) - an uncaught exception exits 1
+    and reads as a finding, red; md_inert's `out.append("\\\\" + ch)` ->
+    `out.append(ch)` - red on `](`.
+    """
+    monkeypatch.setattr(run_guards, "GUARDS_DIR", _forced_guards(
+        tmp_path, f"raise RuntimeError({_FORGED!r})\n"))
+    summary = tmp_path / "summary.md"
+    cfg = run_guards.read_config({"SUTRADHAR_GUARDS": "swallow",
+                                  "SUTRADHAR_PATHS": str(tmp_path)})
+    code = run_guards.run(cfg, {"GITHUB_STEP_SUMMARY": str(summary)})
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "swallow: exit 70 -> crashed" in out, out
+    text = summary.read_text()
+    assert "| swallow | crashed - RuntimeError" in text, text
+    assert "attacker" in text  # the sentence is there, so the next line bites
+    for live in ("<img", "]("):
+        assert live not in text, (live, text)
+    row = [ln for ln in text.splitlines() if ln.startswith("| swallow |")][0]
+    assert not re.search(r"(?<!\\)[\[\]()!*_`~<>]", row), row
+
+
+def test_a_guard_file_that_cannot_be_read_is_crashed_not_could_not_run(
+        tmp_path, monkeypatch, capsys):
+    """`python3 missing.py` exits 2 - the code a guard uses for "could not
+    run", which `on-cannot-run: skip` turns into a pass with a warning. A
+    guard that is not there is the instrument's failure, never a skip (6.8).
+
+    Mutation: the launcher dropped from run()'s `cmd` - exit 2, cannot-run,
+    and under skip the run would have passed on ci-step alone; red.
+    """
+    monkeypatch.setattr(run_guards, "GUARDS_DIR", _forced_guards(tmp_path, None))
+    cfg = run_guards.read_config({"SUTRADHAR_GUARDS": "swallow",
+                                  "SUTRADHAR_PATHS": str(tmp_path),
+                                  "SUTRADHAR_ON_CANNOT_RUN": "skip"})
+    code = run_guards.run(cfg, {})
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "swallow: exit 70 -> crashed" in out, out
+
+
+@pytest.mark.parametrize("live", [
+    "<img src=x>", "<script>", "[a](b)", "![i](b)", "**b**", "__b__", "*e*",
+    "`c`", "a | b", "~~s~~", "https://e.example", "www.e.example", "&amp;",
+    "# h", "\\", "a@b.example",
+])
+def test_md_inert_leaves_no_construct_live(live):
+    """Each construct, escaped, keeps its characters (so a reader sees the
+    text) and loses every markup character unescaped (so nothing renders).
+
+    Mutation: md_inert's `out.append("&amp;")` -> `out.append("&")` - the
+    `&amp;` case is left a live character reference, red.
+    """
+    out = run_guards.md_inert(live)
+    # Read it back the way a renderer would: a token is an escape pair, a
+    # character reference, or one plain character.
+    tokens = re.findall(r"\\.|&(?:lt|gt|amp);|.", out)
+    assert "".join(t[1] if t.startswith("\\") else
+                   {"&lt;": "<", "&gt;": ">", "&amp;": "&"}.get(t, t)
+                   for t in tokens) == live, (live, out)
+    bare = [t for t in tokens if len(t) == 1 and
+            (t in run_guards._MD_PUNCT or t in "&<>")]
+    assert not bare, (live, out, bare)
+
+
+# ── R24-4: the framework passes its own action ──────────────────────────────
+
+SELFTEST = REPO / ".github" / "workflows" / "selftest.yml"
+DOGFOOD_STEP = "Action over this framework's own source (must pass)"
+
+
+def _dogfood_inputs() -> dict:
+    """The `with:` block of the dogfood step, read from the workflow itself,
+    so this test runs exactly what CI runs and cannot drift from it."""
+    text = SELFTEST.read_text()
+    m = re.search(rf"^      - name: {re.escape(DOGFOOD_STEP)}\n"
+                  rf"        uses: \./\n        with:\n((?:          .*\n)+)",
+                  text, re.M)
+    assert m, f"no step named {DOGFOOD_STEP!r} running `uses: ./` in {SELFTEST}"
+    return dict(re.match(r"\s+([\w-]+):\s*(.*)$", ln).groups()
+                for ln in m.group(1).splitlines())
+
+
+def test_the_framework_passes_its_own_action_and_the_baselines_are_why(
+        tmp_path):
+    """The dogfood step, offline, as a pair: its inputs pass; the same paths
+    without the committed baselines are red - so the pass is the banked
+    findings being banked, not a scan that reached nothing.
+
+    Mutation: delete `"python/sutradhar_guards/rounds.py": 1` from
+    .github/sutradhar/swallow_baseline.json - the first half goes red.
+    """
+    inputs = _dogfood_inputs()
+    assert "examples" not in inputs["paths"].split(), inputs
+    env = {run_guards.ENV[k]: v for k, v in inputs.items()}
+    ok = _driver(env, tmp_path)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "4 guard(s) passed" in ok.stdout
+    bare = _driver({"SUTRADHAR_PATHS": inputs["paths"]}, tmp_path)
+    assert bare.returncode == 1, bare.stdout
+    assert "swallow: exit 1 -> finding" in bare.stdout
+    assert "conflated-degrade: exit 1 -> finding" in bare.stdout

@@ -623,3 +623,94 @@ jobs:
       - run: python3 scripts/reachable.py | tee out.log
         shell: {shell}
 """) == [], shell
+
+
+# ── R24-7: a case pattern's bar and a `[[ ]]` bar are not pipes ─────────────
+#
+# `case "$X" in a|b) ...` and `[[ "$REF" =~ ^(main|release/.*)$ ]]` are
+# ordinary CI shell, and neither holds a pipeline. Each pair below puts a
+# real pipe on the same line or the next, so the fix is shown to blank the
+# alternation bars and nothing else.
+
+def test_a_one_line_case_pattern_is_not_a_pipe_and_its_clause_pipe_is(tmp_path):
+    """Mutation (the line that runs, in swallowing_pipes): `code =
+    _mask_alternations(_code_only(raw), cases)` -> `code = _code_only(raw)` -
+    the clean half is flagged, red."""
+    assert _pipe_problems(tmp_path / "a", """
+jobs:
+  a:
+    steps:
+      - run: case "$X" in a|b) echo ab;; esac
+""") == []
+    piped = _pipe_problems(tmp_path / "b", """
+jobs:
+  a:
+    steps:
+      - run: case "$X" in a|b) python3 scripts/reachable.py | tail -5;; esac
+""")
+    assert len(piped) == 1 and "tail -5" in piped[0], piped
+
+
+def test_a_multi_line_case_is_not_a_pipe_and_the_pipe_after_esac_is(tmp_path):
+    """State crosses lines: the bar on the clause line is a pattern; the
+    pipe on the line after `esac` is a pipe again.
+
+    Mutation: `cases[-1] = True` on a clause end -> `pass` - the second
+    clause's pattern bar is read as a pipe, red."""
+    problems = _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: |
+          case "$KIND" in
+            push|pull_request) echo push ;;
+            schedule|workflow_dispatch) echo other ;;
+            *) exit 1 ;;
+          esac
+          python3 scripts/reachable.py | tail -5
+""")
+    assert len(problems) == 1, problems
+    assert "ci.yml:11:" in problems[0], problems
+
+
+def test_a_double_bracket_regex_is_not_a_pipe_and_a_pipe_after_it_is(tmp_path):
+    """Mutation (the line that runs): the `[[ ]]` loop's `out[j] = " "` ->
+    `pass` - the clean half is flagged, red."""
+    assert _pipe_problems(tmp_path / "a", """
+jobs:
+  a:
+    steps:
+      - run: |
+          if [[ "$REF" =~ ^(main|release/.*)$ ]]; then echo deploy; fi
+          if [[ $NAME =~ ^[[:alpha:]]+(a|b)$ ]]; then echo ok; fi
+          [[ $A == x || $B == y ]] && echo either
+""") == []
+    piped = _pipe_problems(tmp_path / "b", """
+jobs:
+  a:
+    steps:
+      - run: if [[ "$REF" =~ ^(main|release/.*)$ ]]; then python3 scripts/reachable.py | tail -3; fi
+""")
+    assert len(piped) == 1 and "tail -3" in piped[0], piped
+
+
+def test_the_true_positives_survive_the_masking(tmp_path):
+    """`|&`, a pipe after pipefail is switched off, and a pipe beside a
+    flag spelled `--case` are all still flagged: the masking is narrow.
+
+    Mutation: `_CASE_RX` without its command-position lookbehind (`case` at
+    any word boundary) - the subshell's `--case x in` is read as a case, its
+    pipe as a pattern bar before the `)`, and blanked; red."""
+    problems = _pipe_problems(tmp_path, """
+jobs:
+  a:
+    steps:
+      - run: |
+          python3 scripts/reachable.py |& tee out.log
+          set -o pipefail
+          set +o pipefail
+          python3 scripts/reachable.py | tail -5
+          ( python3 scripts/reachable.py --case x in | tail -2 )
+""")
+    assert len(problems) == 3, problems
+    assert all(f"ci.yml:{n}:" in " ".join(problems) for n in (6, 9, 10)), problems

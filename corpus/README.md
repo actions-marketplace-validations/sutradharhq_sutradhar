@@ -7,16 +7,23 @@ twin into a throwaway directory, runs the named guard the way that guard
 is really invoked, and scores CAUGHT / MISSED / FALSE_POSITIVE / INVALID.
 
 The denominator is the manifest set: the report counts cases discovered on
-disk (`<caught> of <expected-caught>`), never a loop counter. Deleting a
-case file changes the total, and the total is asserted, so a smaller corpus
-cannot read as the same green.
+disk (`<caught> of <expected-caught>`), never a loop counter. A count read
+off the disk shrinks with the disk, so the total is also declared:
+`case_count.json` holds `{"cases": N}`, and a full run exits 1 unless
+exactly N case files load. Deleting a case without lowering N fails, naming
+the shortfall; adding one without raising N fails too, because a floor left
+below new cases would let the next deletion pass unseen (R24-2). There is
+no flag that rewrites N: it moves by hand, in the reviewed diff that adds
+or deletes the case. CI passes `--require-case-count`, so deleting
+`case_count.json` itself is an exit 2, not a way round it.
 
 ## Adding a case
 
 One markdown file per case in `cases/`, named `<case-id>.md`. Nothing here
 is ever a live `.py` file: the plugin precommit gate lints staged Python,
 pytest must never collect a defect file, and `compileall` must never parse
-one. Fences open and close on their own lines.
+one. Fences open and close on their own lines. Raise `cases` in
+`case_count.json` by one in the same diff.
 
 Frontmatter (flat scalars, the house parser):
 

@@ -145,18 +145,89 @@ def test_the_denominator_comes_from_the_manifest_set_not_a_loop_counter(
                       "invalid": 0}
 
 
-def test_deleting_a_case_file_changes_the_total_and_fails(tmp_path):
-    """The pair to the denominator test: with one file gone the run must
-    report "1 of 1", so a test pinning yesterday's total breaks instead of
-    silently counting a smaller corpus as the same green."""
+def test_deleting_a_case_file_fails_against_the_declared_count(tmp_path):
+    """R24-2. This test used to be named `..._changes_the_total_and_fails`
+    and asserted only that the total dropped, with exit 0: the corpus
+    printed "1 of 1" and passed, the R22-1 shape one level down. Now the
+    pair: two cases declared and on disk pass; delete one and the same run
+    exits 1 naming the shortfall; lower the declaration in the same change
+    and it passes again - the floor moves, and only visibly.
+
+    Mutation (the line that runs, in _run_all): `elif count_problem:` ->
+    `elif False:` - the deletion exits 0, red.
+    """
     _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
     _write(tmp_path, "b.md", _manifest("b", defective=SWALLOW, clean=PLAIN))
-    _, said_before = _run([str(tmp_path), "--json"])
+    (tmp_path / "case_count.json").write_text('{"cases": 2}')
+    code, said = _run([str(tmp_path), "--json"])
+    assert code == 0, said
+    assert "case count holds: 2 of 2" in said
     (tmp_path / "cases" / "b.md").unlink()
-    code, said_after = _run([str(tmp_path), "--json"])
-    assert code == 0
-    assert _json_of(said_before)["totals"]["expected_caught"] == 2
-    assert _json_of(said_after)["totals"]["expected_caught"] == 1
+    code, said = _run([str(tmp_path), "--json"])
+    assert code == 1, said
+    assert "1 case file(s) on disk, 2 declared" in said and "1 short" in said
+    assert _json_of(said)["exit"] == 1
+    (tmp_path / "case_count.json").write_text('{"cases": 1}')
+    code, said = _run([str(tmp_path)])
+    assert code == 0, said
+
+
+def test_adding_a_case_without_raising_the_declared_count_fails(tmp_path):
+    """The other direction: a floor left below new cases would let the next
+    deletion pass unseen, so a count above the declaration fails too.
+
+    Mutation (the line that runs, in case_count_problem): `if on_disk >
+    declared:` -> `if False:` - exit 0, red.
+    """
+    _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
+    _write(tmp_path, "b.md", _manifest("b", defective=SWALLOW, clean=PLAIN))
+    (tmp_path / "case_count.json").write_text('{"cases": 1}')
+    code, said = _run([str(tmp_path)])
+    assert code == 1, said
+    assert "1 over" in said
+
+
+def test_require_case_count_refuses_a_corpus_with_no_declaration(tmp_path):
+    """Deleting `case_count.json` together with a case must not be a way
+    round the floor in this repository's CI, which passes the flag. Without
+    the flag the run says the total is not asserted (the pair).
+
+    Mutation (the line that runs, in _run_all): `if declared is None and
+    require_count:` -> `if False:` - exit 0, red.
+    """
+    _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
+    code, said = _run([str(tmp_path), "--require-case-count"])
+    assert code == 2, said
+    assert "case_count.json" in said
+    code, said = _run([str(tmp_path)])
+    assert code == 0, said
+    assert "not asserted" in said
+
+
+@pytest.mark.parametrize("text", ['{"cases": 0}', '{"cases": "2"}', "[2]",
+                                  '{"cases": 2, "extra": 1}', "not json",
+                                  '{"cases": true}'])
+def test_an_unreadable_declared_count_is_refused_not_read_as_absent(
+        tmp_path, text):
+    """A broken floor read as no floor would pass every deletion (2.7).
+
+    Mutation: load_case_count's shape-check `raise CorpusError(` ->
+    `return None; raise CorpusError(` - the five shape cases exit 0, red
+    ("not json" reaches the JSON-error raise above it and stays green).
+    """
+    _write(tmp_path, "a.md", _manifest("a", defective=SWALLOW, clean=PLAIN))
+    (tmp_path / "case_count.json").write_text(text)
+    code, said = _run([str(tmp_path)])
+    assert code == 2, said
+    assert "declared case count" in said
+
+
+def test_this_repositorys_corpus_declares_exactly_its_case_files():
+    """The real floor, read the way CI reads it."""
+    root = Path(__file__).resolve().parents[2] / "corpus"
+    declared = corpus.load_case_count(root / "case_count.json")
+    on_disk = len(list((root / "cases").glob("*.md")))
+    assert declared == on_disk, (declared, on_disk)
 
 
 def test_a_case_citing_a_scar_no_round_record_contains_is_refused(tmp_path):

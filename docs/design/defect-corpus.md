@@ -1,5 +1,5 @@
 ---
-sutradhar_scar: R22-1, R22-2
+sutradhar_scar: R22-1, R22-2, R24-2
 sutradhar_budget: defect-corpus
 n: 60
 n_unit: corpus cases
@@ -18,7 +18,9 @@ ci_slack: 2.0
 The framework's improvement loop needs a scorer that cannot be gamed by
 deleting cases or by counting its own loop iterations. `corpus.py` scores
 defective/clean twin pairs through the real guard invocations, takes its
-denominator from the manifest set on disk, and holds a per-rule coverage
+denominator from the manifest set on disk, holds that total against a
+declared `case_count.json` (R24-2: a disk-derived denominator alone let a
+deleted case print "51 of 51" and pass), and holds a per-rule coverage
 floor with a shrink-only reason bank. The weekly proposer round reads it
 before writing any guard.
 

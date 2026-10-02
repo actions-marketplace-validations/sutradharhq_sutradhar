@@ -32,10 +32,21 @@ Every guard exits 0 clean, 1 a finding, 2 could not run. Read here as:
     1                  finding - fails the job
     2                  could not run - fails the job unless
                        on-cannot-run is `skip`, and is never silent
-    anything else, or 1/2 with a Python traceback in the output:
+    70, or anything else:
                        crashed - fails the job whatever on-cannot-run says.
                        A crash is the instrument's failure, not a verdict
                        about the code (6.8, 6.11), and it is named as such.
+
+A crash is decided by the exit code alone, never by reading the output. A
+guard's output quotes the pull request under test - an f-string expression,
+a filename - on stdout and on stderr alike, so any text test over it is a
+verdict the pull request can forge: a file named `Traceback (most recent
+call last).py` used to turn a finding into "crashed - the guard failed, not
+your code" (R24-1). Each guard is therefore started under a launcher this
+script owns (`_LAUNCH`), which runs it exactly as `python3 guard.py` would
+and turns an exception that escapes the guard - including a guard file that
+cannot be read - into exit 70, a code no guard uses. Every adopter-derived
+string written to the step summary is escaped to inert text (`md_inert`).
 
 `on-cannot-run` defaults to `fail`, because a job that goes green when a
 guard read nothing is the R21-2 lie (an OK over zero files) told one level
@@ -60,6 +71,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 GUARDS_DIR = Path(__file__).resolve().parent.parent / "python" / "sutradhar_guards"
@@ -118,7 +130,36 @@ DEFAULTS = {
 #: or a character no repository path needs, and the refusal names it.
 _PATH_RX = re.compile(r"[A-Za-z0-9._/][A-Za-z0-9._/-]*")
 _KEYWORDS_RX = re.compile(r"[A-Za-z][A-Za-z ,]*")
-_TRACEBACK = "Traceback (most recent call last)"
+
+#: The exit code the launcher gives an exception that escaped a guard. No
+#: guard returns it: they exit 0, 1 or 2 (EX_SOFTWARE, sysexits.h).
+CRASH_EXIT = 70
+
+#: Runs one guard as `python3 <guard> <args>` would - same argv, same
+#: sys.path[0], `__main__` - and owns the one decision the output cannot be
+#: trusted with: an exception escaping the guard (or a guard file that cannot
+#: be read) prints its traceback to stderr and exits CRASH_EXIT. SystemExit
+#: is the guard's own verdict and passes through untouched.
+_LAUNCH = (
+    "import os, runpy, sys, traceback\n"
+    "script = sys.argv[1]\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path[0] = os.path.dirname(os.path.abspath(script))\n"
+    "try:\n"
+    "    runpy.run_path(script, run_name='__main__')\n"
+    "except SystemExit:\n"
+    "    raise\n"
+    "except BaseException:\n"
+    "    sys.stdout.flush()\n"
+    "    traceback.print_exc()\n"
+    "    sys.stderr.flush()\n"
+    f"    os._exit({CRASH_EXIT})\n"
+)
+
+#: Every ASCII punctuation character. Each one that opens a Markdown or GFM
+#: construct is in here, so escaping all of them is complete by construction
+#: rather than by a list someone has to keep current.
+_MD_PUNCT = set("!\"#$%'()*+,-./:;=?@[\\]^_`{|}~")
 
 
 class Refused(Exception):
@@ -137,6 +178,35 @@ def _escape_data(s: str) -> str:
 def _escape_property(s: str) -> str:
     """Workflow-command property escaping: data's, plus `:` and `,`."""
     return _escape_data(s).replace(":", "%3A").replace(",", "%2C")
+
+
+def md_inert(s: str) -> str:
+    """``s`` as Markdown that renders as exactly its own text, and nothing else.
+
+    For adopter-derived text in GITHUB_STEP_SUMMARY, which GitHub renders as
+    GFM with HTML. Complete by construction, not by list: `&`, `<` and `>`
+    become character references, so no tag, entity or `<...>` autolink can
+    open; every other ASCII punctuation character is backslash-escaped, which
+    CommonMark defines for exactly that set and which renders it literally -
+    and every inline construct (emphasis, code, link, image, strikethrough, a
+    table's cell bar, a hard break) and every block marker opens with one of
+    them. GFM's extended autolinks need `://`, `www.` or `@` as one run of
+    text; an escape splits the run, so none forms. Line breaks become spaces,
+    so the text cannot leave its table cell.
+    """
+    out = []
+    for ch in " ".join(s.split()):
+        if ch == "&":
+            out.append("&amp;")
+        elif ch == "<":
+            out.append("&lt;")
+        elif ch == ">":
+            out.append("&gt;")
+        elif ch in _MD_PUNCT:
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def check_path(name: str, value: str) -> str:
@@ -265,10 +335,13 @@ def plan(cfg: dict) -> list:
     return out
 
 
-def classify(code: int, output: str) -> str:
-    """pass | finding | cannot-run | crashed."""
-    if _TRACEBACK in output:
-        return "crashed"
+def classify(code: int) -> str:
+    """pass | finding | cannot-run | crashed, from the exit code alone.
+
+    Takes no output on purpose: the output quotes the pull request, so a
+    verdict read from it is one the pull request can write (R24-1). A crash
+    is CRASH_EXIT from the launcher, or any code no guard returns.
+    """
     return {0: "pass", 1: "finding", 2: "cannot-run"}.get(code, "crashed")
 
 
@@ -285,8 +358,9 @@ def run(cfg: dict, environ: "dict[str, str]") -> int:
             print(pre, flush=True)
             verdict, sentence, output = "cannot-run", pre, pre
         else:
-            cmd = [sys.executable, str(GUARDS_DIR / SCRIPTS[guard]), *args]
-            _say("$ " + " ".join(cmd[1:]))
+            script = str(GUARDS_DIR / SCRIPTS[guard])
+            cmd = [sys.executable, "-c", _LAUNCH, script, *args]
+            _say("$ " + " ".join([script, *args]))
             proc = subprocess.run(cmd, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True)
             # Captured apart, not merged: a guard writes its refusal to
@@ -305,7 +379,7 @@ def run(cfg: dict, environ: "dict[str, str]") -> int:
                     print(stream, end="" if stream.endswith("\n") else "\n",
                           flush=True)
             print(f"::{token}::", flush=True)
-            verdict = classify(proc.returncode, output)
+            verdict = classify(proc.returncode)
             sentence = (_last_sentence(proc.stderr) if proc.stderr.strip()
                         else _last_sentence(proc.stdout))
             _say(f"{guard}: exit {proc.returncode} -> {verdict}")
@@ -353,9 +427,13 @@ def run(cfg: dict, environ: "dict[str, str]") -> int:
         rows = ["### Sutradhar guards", "", f"**{headline}**", "",
                 "| guard | verdict |", "| --- | --- |"]
         for guard, verdict, sentence in results:
-            label = {"cannot-run": f"could not run - {sentence}",
-                     "crashed": f"crashed - {sentence}"}.get(verdict, verdict)
-            rows.append(f"| {guard} | {label.replace('|', '/')} |")
+            # The sentence is the guard's last line, which quotes the pull
+            # request; it is escaped to inert text. Guard names and verdict
+            # words are this script's own.
+            label = {"cannot-run": f"could not run - {md_inert(sentence)}",
+                     "crashed": f"crashed - {md_inert(sentence)}"}.get(
+                         verdict, verdict)
+            rows.append(f"| {guard} | {label} |")
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write("\n".join(rows) + "\n")
     return code
@@ -389,14 +467,36 @@ def selfcheck() -> bool:
     if cfg["guards"] != list(DEFAULT_GUARDS) or cfg["policy"] != "fail":
         problems.append(f"defaults drifted: {cfg['guards']} {cfg['policy']}")
 
-    tb = f"{_TRACEBACK}:\n  File \"x.py\"\nKeyError: 'k'\n"
-    for (code, out), want in (((0, "ok"), "pass"), ((1, "found"), "finding"),
-                              ((2, "nothing was scanned"), "cannot-run"),
-                              ((1, tb), "crashed"), ((2, tb), "crashed"),
-                              ((127, ""), "crashed"), ((-9, ""), "crashed")):
-        got = classify(code, out)
+    for code, want in ((0, "pass"), (1, "finding"), (2, "cannot-run"),
+                       (CRASH_EXIT, "crashed"), (127, "crashed"),
+                       (-9, "crashed")):
+        got = classify(code)
         if got != want:
             problems.append(f"exit {code} classified {got!r}, not {want!r}")
+
+    # The launcher, in a pair: an exception escaping a guard is a crash, and
+    # a guard exiting 1 with a traceback-shaped line it printed is not.
+    forged = ("print('Traceback (most recent call last) <img src=x>')\n"
+              "raise SystemExit(1)\n")
+    with tempfile.TemporaryDirectory() as d:
+        for body, want in (("raise KeyError('k')\n", CRASH_EXIT), (forged, 1),
+                           (None, CRASH_EXIT)):
+            guard = Path(d) / "guard.py"
+            if body is None:
+                guard = Path(d) / "absent.py"
+            else:
+                guard.write_text(body)
+            proc = subprocess.run([sys.executable, "-c", _LAUNCH, str(guard)],
+                                  capture_output=True, text=True)
+            if proc.returncode != want:
+                problems.append(f"launcher gave {guard.name} exit "
+                                f"{proc.returncode}, not {want}")
+
+    raw = "x <img src=y> [a](https://e.example) **b** `c` | d ~e~ www.f.example"
+    inert = md_inert(raw)
+    for live in ("<img", "](", "**", "`c`", " | ", "~e~", "://", "www."):
+        if live in inert:
+            problems.append(f"md_inert left {live!r} live in {inert!r}")
 
     for p in problems:
         print(f"[sutradhar-action] SELFCHECK FAILED: {p}")
@@ -404,8 +504,9 @@ def selfcheck() -> bool:
         print("[sutradhar-action] selfcheck ok: metacharacter and flag-shaped "
               "paths refused, plain paths accepted, framework-only gates and "
               "unknown guards refused, defaults are the four source/CI guards "
-              "with on-cannot-run fail, a traceback reads as crashed rather "
-              "than a finding")
+              "with on-cannot-run fail, an exception escaping a guard reads "
+              "as crashed and a traceback-shaped line in its output does "
+              "not, summary text escaped inert")
     return not problems
 
 

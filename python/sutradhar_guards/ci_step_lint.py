@@ -66,7 +66,11 @@ A pipe is flagged unless one of these holds, each checked, none guessed:
     is a report, not a swallowed check).
 
 ``||`` is not a pipe, and ``|`` inside quotes, ``${{ }}`` expressions, or a
-comment is not read as one. Only POSIX shells (bash, sh, zsh) are read for
+comment is not read as one. Nor is the alternation bar of a ``case`` pattern
+list (``a|b) ...;;``) or any ``|`` between ``[[`` and ``]]``, ``=~`` regexes
+included (R24-7): neither is a pipeline in bash, and both are ordinary CI
+shell. A real pipe in the same line - in a case clause's command, after the
+``]]`` - is still read. Only POSIX shells (bash, sh, zsh) are read for
 pipes at all. pwsh, powershell and cmd have a different exit-code model and
 the remedy printed here (``set -o pipefail``) is a bash command that breaks
 them; ``python`` or a custom interpreter reads ``|`` as an operator. A step
@@ -185,6 +189,84 @@ def _code_only(line: str) -> str:
     return re.sub(r"(^|\s)#.*$", r"\1", s)
 
 
+#: `[[ ... ]]` - opened by `[[` and a blank, closed by a `]]` that stands as
+#: its own word, so the `]]` of a bracket class (`[[:alpha:]]`) does not end
+#: it early.
+_DBRACKET_RX = re.compile(r"\[\[\s.*?\s\]\](?=$|[\s;&|)])")
+#: `case WORD in` in command position (line start, or after a separator or
+#: an opening keyword) - not `--case x in` as a flag's value.
+_CASE_RX = re.compile(r"(?:^|(?<=[\s;&|({]))case\s+\S+\s+in(?=$|[\s;])")
+#: The end of a case clause: `;;`, `;&` or `;;&`.
+_CLAUSE_END_RX = re.compile(r";;&?|;&")
+#: `esac` as a word in command position.
+_ESAC_RX = re.compile(r"(?:^|(?<=[\s;&]))esac(?=$|[\s;&|)])")
+
+
+def _mask_alternations(code: str, cases: list) -> str:
+    """``code`` with every `|` that is not a pipeline blanked: those inside
+    `[[ ... ]]`, and the alternation bars of a case pattern list.
+
+    ``cases`` carries state from line to line of one step: one entry per
+    open `case`, True while the next thing is a pattern list (after `in`,
+    or after `;;`). A pattern list runs to its closing `)` at paren depth
+    zero; if a line holds no such `)`, nothing on it is blanked - reading
+    a real pipe as a pattern would be the false negative, and this errs the
+    other way.
+    """
+    out = list(code)
+    for m in _DBRACKET_RX.finditer(code):
+        for j in range(m.start(), m.end()):
+            if out[j] == "|":
+                out[j] = " "
+    i, n = 0, len(code)
+    while i < n:
+        if cases and cases[-1]:
+            while i < n and code[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            m = _ESAC_RX.match(code, i)
+            if m:
+                cases.pop()
+                i = m.end()
+                continue
+            k = i + 1 if code[i] == "(" else i
+            depth, close = 0, None
+            while k < n:
+                if code[k] == "(":
+                    depth += 1
+                elif code[k] == ")":
+                    if depth == 0:
+                        close = k
+                        break
+                    depth -= 1
+                k += 1
+            if close is None:
+                break
+            for j in range(i, close):
+                if out[j] == "|":
+                    out[j] = " "
+            cases[-1] = False
+            i = close + 1
+            continue
+        hits = [(m.start(), kind, m) for kind, m in (
+            ("case", _CASE_RX.search(code, i)),
+            ("end", _CLAUSE_END_RX.search(code, i) if cases else None),
+            ("esac", _ESAC_RX.search(code, i) if cases else None),
+        ) if m]
+        if not hits:
+            break
+        _, kind, m = min(hits, key=lambda h: h[0])
+        if kind == "case":
+            cases.append(True)
+        elif kind == "end":
+            cases[-1] = True
+        else:
+            cases.pop()
+        i = m.end()
+    return "".join(out)
+
+
 def _key_value(line: str, key: str) -> "str | None":
     m = re.match(rf"^\s*(?:-\s+)?{key}:\s*(.+?)\s*$", line)
     return m.group(1).strip("'\"") if m else None
@@ -288,10 +370,11 @@ def swallowing_pipes(text: str) -> list:
         if _shell_sets_pipefail(shell):
             continue
         armed = False
+        cases: list = []
         for k, raw in enumerate(body.split("\n")):
             if k == 0 and _BLOCK_RX.match(raw.strip()):
                 continue
-            code = _code_only(raw)
+            code = _mask_alternations(_code_only(raw), cases)
             if _PIPEFAIL_OFF_RX.search(code):
                 armed = False
             if _PIPEFAIL_ON_RX.search(code):
@@ -436,6 +519,30 @@ jobs:
 """
 
 
+_PIPE_CASE_AND_TEST = """
+jobs:
+  a:
+    steps:
+      - run: |
+          case "$X" in a|b) echo ab;; esac
+          case "$KIND" in
+            push|pull_request) python3 scripts/reachable.py ;;
+            *) exit 1 ;;
+          esac
+          if [[ "$REF" =~ ^(main|release/.*)$ ]]; then python3 scripts/reachable.py; fi
+"""
+
+_PIPE_CASE_AND_TEST_PIPED = """
+jobs:
+  a:
+    steps:
+      - run: |
+          case "$KIND" in
+            push|pull_request) python3 scripts/reachable.py | tail -5 ;;
+          esac
+"""
+
+
 def selfcheck() -> bool:
     """Known-good and known-bad for every claim, because an exit code is
     evidence only in pairs (6.7)."""
@@ -460,6 +567,10 @@ def selfcheck() -> bool:
             ("a pipe in a linux job with no shell key", _PIPE_LINUX_JOB, True),
             ("the same pipe in a windows job, pwsh by default",
              _PIPE_WINDOWS_JOB, False),
+            ("case pattern alternations and a `[[ =~ ]]` regex, no pipe",
+             _PIPE_CASE_AND_TEST, False),
+            ("a real pipe in a case clause's command", _PIPE_CASE_AND_TEST_PIPED,
+             True),
         ):
             wf.write_text(body)
             found, checked, skipped = audit(wf, root)
@@ -510,7 +621,9 @@ def selfcheck() -> bool:
             "`- run:` inline form read as a step, a pipe that swallows the "
             "exit code rejected, the same pipe accepted under pipefail and "
             "under `shell: bash`, a linux job's pipe rejected and the same "
-            "pipe in a windows job (pwsh by default) accepted"
+            "pipe in a windows job (pwsh by default) accepted, case-pattern "
+            "and `[[ =~ ]]` alternation bars accepted and a real pipe in a "
+            "case clause rejected"
         )
     return not problems
 

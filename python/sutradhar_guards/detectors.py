@@ -127,7 +127,17 @@ def find_unresolved_relative_imports(package_root: str | Path) -> list[Violation
 
 
 def _module_exports(mod_file: Path) -> set[str] | None:
-    """Top-level names a module defines. None = could not parse (skip)."""
+    """Top-level names a module defines. None = names unknowable (skip).
+
+    Two causes share the None on purpose - the module does not parse, or it
+    star-re-exports - and that conflation is banked, not fixed (R24-6): to
+    the one caller both mean "the names cannot be checked", and the parse
+    failure is not silent, because the walk in
+    find_unresolved_relative_imports reports every file under the root that
+    does not parse as its own `::does not parse` violation in the same list.
+    The residual - a relative import climbing above the scanned root to a
+    module that does not parse - is recorded as deferred in round 24.
+    """
     try:
         tree = ast.parse(mod_file.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
