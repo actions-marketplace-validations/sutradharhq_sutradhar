@@ -6,7 +6,7 @@ evolve freely within a minor version. Tags mark releases; copy-in users
 upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 <repo>`, run from a newer checkout, says which tag that was.
 
-## Unreleased
+## v0.6.0 - 2026-10-02
 
 **Adoptable in one line: a GitHub Action and pre-commit hooks**
 (distribution; usable from v0.6.0).

@@ -7,7 +7,7 @@ authors:
     given-names: Varun
 repository-code: "https://github.com/sutradharhq/sutradhar"
 license: Apache-2.0
-version: 0.5.2
+version: 0.6.0
 date-released: "2026-09-13"
 abstract: >-
   An engineering harness for AI coding agents: a doctrine and stdlib-only,
