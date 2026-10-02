@@ -179,7 +179,8 @@ def test_the_action_defaults_are_the_drivers_defaults():
 def test_no_default_guard_is_a_gate_only_this_repository_can_fail():
     """Same rule as the hooks, through the driver's own table.
 
-    Mutation: add "framework-shape" to DEFAULT_GUARDS and SCRIPTS - red.
+    Mutation: append "framework-shape" to DEFAULT_GUARDS and map it to
+    framework_shape.py in SCRIPTS - red.
     """
     for g in run_guards.DEFAULT_GUARDS:
         assert run_guards.SCRIPTS[g] not in FRAMEWORK_ONLY_GATES, g
@@ -252,8 +253,11 @@ def test_a_run_where_every_guard_was_skipped_fails_even_under_skip(tmp_path):
 
 @pytest.mark.parametrize("name", ["framework_shape", "framework-only"])
 def test_a_framework_only_gate_is_refused_by_name(tmp_path, name):
-    """Mutation: delete REFUSED_GUARDS' check in read_config (and map the name
-    in SCRIPTS) - the gate runs and passes, red."""
+    """Refused, and the refusal says why - "unknown guard" would leave an
+    adopter guessing whether a spelling would fix it.
+
+    Mutation: `if g in REFUSED_GUARDS:` -> `if False:` in read_config - the
+    name falls through to "unknown guard" with no R20-4, red."""
     r = _driver({"SUTRADHAR_GUARDS": name}, tmp_path)
     assert r.returncode == 2 and "R20-4" in r.stderr, r.stderr
 
@@ -262,7 +266,7 @@ def test_an_opt_in_budget_with_no_design_notes_cannot_run(tmp_path):
     """budget.py itself exits 0 with "nothing to check" over a missing notes
     directory; asked for by name, that is a check that never ran.
 
-    Mutation: `pre = None` forced in the budget branch of plan() - red.
+    Mutation: `if missing:` -> `if False:` in plan()'s budget branch - red.
     """
     tests = {"SUTRADHAR_GUARDS": "budget", "SUTRADHAR_TESTS_DIR": "python/tests"}
     r = _driver({**tests, "SUTRADHAR_DESIGN_DIR": "no/such"}, tmp_path)
