@@ -95,7 +95,7 @@ macOS runners).
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: sutradharhq/sutradhar@v0.6.0
+- uses: sutradharhq/sutradhar@v0.6.1
   with:
     paths: src          # where your Python lives; default is the whole repo
 ```
@@ -108,7 +108,7 @@ set `on-cannot-run: skip` to turn that into a visible, named skip instead.
 Existing findings? Commit the `swallow_baseline.json` that
 `python3 swallow_lint.py src --update-baseline` writes, and the action holds
 you to that floor rather than to zero. Every input is documented in
-[action.yml](action.yml). Available from the v0.6.0 release.
+[action.yml](action.yml). Available from the v0.6.1 release.
 
 The action reads your tree as data: every guard runs in Python's isolated
 mode, so nothing in the checkout is imported. It does call `python3` by
@@ -121,7 +121,7 @@ that tree supplies the interpreter the action runs (R24-30).
 ```yaml
 repos:
   - repo: https://github.com/sutradharhq/sutradhar
-    rev: v0.6.0
+    rev: v0.6.1
     hooks:
       - id: sutradhar-swallow
       - id: sutradhar-interpolation
@@ -132,7 +132,7 @@ repos:
 The same four guards, before the commit instead of after the push. A guard
 that can't run blocks the commit and prints why, rather than letting it
 through quietly. Needs `python3` 3.9 or newer on your PATH; nothing is
-installed. Available from the v0.6.0 release. The hooks run with your own
+installed. Available from the v0.6.1 release. The hooks run with your own
 environment: a `PYTHONPATH=.` exported in your shell is yours, not the
 hook's, and puts your working tree on the guards' import path (R24-30).
 

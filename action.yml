@@ -21,9 +21,8 @@
 
 name: Sutradhar guards
 description: >-
-  Fail CI on silent exception swallows, query string interpolation,
-  failures that read as empty results, and CI steps that cannot reach
-  their script or pipe away its exit code. Stdlib-only Python, no install.
+  Fail CI on swallowed exceptions, interpolated SQL, errors that look like
+  empty results, and CI pipes that hide exit codes.
 author: Varun Mundra
 branding:
   icon: shield

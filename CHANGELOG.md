@@ -6,6 +6,18 @@ evolve freely within a minor version. Tags mark releases; copy-in users
 upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 <repo>`, run from a newer checkout, says which tag that was.
 
+## v0.6.1 - 2026-10-03
+
+**The Action's description fits the GitHub Marketplace.**
+
+- The Marketplace refuses an `action.yml` description of 125 characters or
+  more, and v0.6.0's was 206, so v0.6.0 could not be listed. The description
+  is now 122 characters and names the same four default checks. Nothing a
+  guard does changed; v0.6.0 stays tagged exactly as it was.
+- `test_the_marketplace_description_fits_its_limit` fails if the
+  description reaches 125 again: the limit is GitHub's, so nothing here
+  encoded it, and four review passes read past it.
+
 ## v0.6.0 - 2026-10-02
 
 **Adoptable in one line: a GitHub Action and pre-commit hooks**

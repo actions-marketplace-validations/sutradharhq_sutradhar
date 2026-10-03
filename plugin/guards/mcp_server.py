@@ -74,7 +74,7 @@ import urllib.parse
 from pathlib import Path
 
 SERVER_NAME = "sutradhar-guards"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.6.1"
 
 # Verified against the specification on 2026-09-02; see docs/design/mcp-server.md
 # for the page URLs. Newest first - `server/discover` reports this list, and a

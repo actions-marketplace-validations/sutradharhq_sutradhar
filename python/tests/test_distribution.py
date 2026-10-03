@@ -609,3 +609,20 @@ def test_a_bom_prefixed_swallow_is_a_finding_at_the_action_not_a_pass(tmp_path):
         assert r.returncode == 1, (twin, r.stdout + r.stderr)
         assert "swallow: exit 1 -> finding" in r.stdout, (twin, r.stdout)
         assert "src/app.py:4" in r.stdout, (twin, r.stdout)
+
+
+def test_the_marketplace_description_fits_its_limit():
+    """The GitHub Marketplace refuses an action description of 125
+    characters or more. v0.6.0 shipped one of 206 and could not be listed,
+    because the limit is GitHub's and nothing in this repository said so.
+
+    Mutation: restoring v0.6.0's 206-character description turns this red."""
+    import re as _re
+    text = (REPO / "action.yml").read_text(encoding="utf-8")
+    block = _re.search(r"^description: >-\n((?:  .*\n)+)", text, _re.M)
+    assert block, "action.yml has no folded `description: >-` block"
+    description = " ".join(line.strip() for line in block.group(1).splitlines())
+    assert 0 < len(description) < 125, (
+        f"description is {len(description)} characters; the Marketplace "
+        f"requires fewer than 125: {description!r}")
+
