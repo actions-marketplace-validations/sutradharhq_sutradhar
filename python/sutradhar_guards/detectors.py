@@ -1,6 +1,6 @@
 """Ready-made detectors for the Ratchet library.
 
-Two class detectors with proven records, shipped so a new project's first
+Class detectors with proven records, shipped so a new project's first
 ratchet costs five minutes instead of an afternoon. Wire them per
 docs/backend.md:
 
@@ -15,7 +15,7 @@ defects the sweep had missed, and kept finding new ones as the codebase
 grew (a helper-level unit test structurally cannot see a handler's broken
 import - this walks every module without executing any).
 
-Both detectors return `Violation(key, message)`. The KEY is the file plus
+Every detector returns `Violation(key, message)`. The KEY is the file plus
 the normalised matched text (`src/a.py::from .util import helper`), with
 `#2`, `#3` in source order for a repeat of the same text in one file; the
 LINE NUMBER lives in the message and never in the key. A key that moved
@@ -248,6 +248,123 @@ def find_order_by_without_limit(
     ]
 
 
+# ── helpers with a test and no caller ───────────────────────────────────────
+
+_TEST_DIR_PARTS = frozenset({"test", "tests"})
+
+
+def _is_test_file(py: Path, root: Path) -> bool:
+    rel = py.relative_to(root)
+    if any(part in _TEST_DIR_PARTS for part in rel.parts[:-1]):
+        return True
+    return (py.name.startswith("test_") or py.name.endswith("_test.py")
+            or py.name == "conftest.py")
+
+
+def _referenced_names(tree: ast.AST, skip: ast.AST | None = None) -> set[str]:
+    """Every Name id and Attribute attr in `tree`, minus `skip`'s subtree.
+
+    Attribute attrs are included so `units._helper()` from a test that did
+    `from app import units` still counts as the alibi it is.
+    """
+    skipped = {id(n) for n in ast.walk(skip)} if skip is not None else set()
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in skipped:
+            continue
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+    return names
+
+
+def find_test_only_helpers(package_root: str | Path) -> list[Violation]:
+    """Private helpers whose only callers are tests.
+
+    Doctrine 8.2: a test is not a caller, and dead code with a test has an
+    alibi. Flags a module-level ``_name`` function that at least one test
+    file references and no production file does (its own body excluded, so
+    recursion is not a caller). Deliberately narrow, because every wider
+    net lies in the other direction: public names are an exported contract
+    whose callers live outside the tree, decorated functions are reached
+    through their decorator, and a name in ``__all__`` is public by
+    declaration - all skipped. A helper nothing references at all is plain
+    dead code for an ordinary linter, not this alibi class.
+
+    Matching is by bare name across the tree, without import resolution: a
+    production reference to the same name anywhere clears every helper
+    carrying it, which errs toward silence, never toward a false flag. A
+    production file that does not parse makes every "no production caller"
+    claim unknowable, so it is reported as its own violation and no helper
+    is flagged from that walk (2.9: could-not-measure is not a pass; the
+    key differs from the import finder's parse key, so one baseline can
+    bank both).
+
+    Returns ``Violation(key, message)``: the key is ``path::def _name``,
+    position-free; the line and the alibi test files live in the message.
+    """
+    root = Path(package_root).resolve()
+    prod: list[tuple[Path, ast.AST]] = []
+    tests: list[tuple[Path, ast.AST]] = []
+    violations: list[Violation] = []
+    unparsable_production = False
+
+    for py in sorted(root.rglob("*.py")):
+        if "__pycache__" in str(py):
+            continue
+        is_test = _is_test_file(py, root)
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError as e:
+            if not is_test:
+                unparsable_production = True
+                violations.append(Violation(
+                    f"{py}::helper callers unknowable (does not parse)",
+                    f"{py}:{e.lineno}: does not parse, so no production "
+                    f"caller can be counted: {e.msg}",
+                ))
+            continue
+        (tests if is_test else prod).append((py, tree))
+
+    if unparsable_production:
+        return violations
+
+    for py, tree in prod:
+        exported: set[str] = set()
+        for n in tree.body:
+            targets = (n.targets if isinstance(n, ast.Assign)
+                       else [n.target] if isinstance(n, ast.AnnAssign) else [])
+            if any(isinstance(t, ast.Name) and t.id == "__all__"
+                   for t in targets):
+                for c in ast.walk(n):
+                    if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                        exported.add(c.value)
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name = node.name
+            if (not name.startswith("_") or name.startswith("__")
+                    or node.decorator_list or name in exported):
+                continue
+            prod_refs = name in _referenced_names(tree, skip=node) or any(
+                name in _referenced_names(t) for p, t in prod if p != py
+            )
+            alibis = sorted(
+                p.relative_to(root).as_posix()
+                for p, t in tests if name in _referenced_names(t)
+            )
+            if not prod_refs and alibis:
+                violations.append(Violation(
+                    f"{py}::def {name}",
+                    f"{py}:{node.lineno}: {name} has a test and no "
+                    f"production caller (referenced only from "
+                    f"{', '.join(alibis[:3])}): a test is not a caller, "
+                    f"and dead code with a test has an alibi",
+                ))
+    return violations
+
+
 def selfcheck() -> bool:
     """Plant a known-bad input for each detector and demand it is found.
 
@@ -312,11 +429,33 @@ def selfcheck() -> bool:
         if {v.key for v in moved} != {v.key for v in found}:
             _fail("an added import line above a violation changed its key")
 
+    with tempfile.TemporaryDirectory() as td:
+        app = Path(td)
+        (app / "tests").mkdir()
+        (app / "units.py").write_text(
+            "def rollup(samples):\n    return len(samples)\n\n\n"
+            "def _mean(samples):\n    return 1\n"
+        )
+        (app / "tests" / "test_units.py").write_text(
+            "import units\n\n\ndef test_mean():\n"
+            "    assert units._mean([]) == 1\n"
+        )
+        if not find_test_only_helpers(app):
+            _fail("a private helper with a test and no production caller "
+                  "was not flagged")
+        (app / "units.py").write_text(
+            "def rollup(samples):\n    return _mean(samples)\n\n\n"
+            "def _mean(samples):\n    return 1\n"
+        )
+        if find_test_only_helpers(app):
+            _fail("a helper with a production caller was flagged anyway")
+
     if ok:
         print(
             "[detectors] selfcheck ok: ORDER BY (string + f-string) caught, "
             "LIMIT respected, unresolved module and name both caught, keys "
-            "unchanged by lines inserted above them"
+            "unchanged by lines inserted above them, test-only helper "
+            "flagged and a called one left alone"
         )
     return ok
 

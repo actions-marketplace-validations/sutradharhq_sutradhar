@@ -78,7 +78,7 @@ Each guard reads fixed paths inside the throwaway dir:
 |---|---|---|---|
 | swallow_lint | `.py` anywhere | none | none |
 | interpolation_lint | `.py` anywhere | none | `strict` |
-| detectors | `.py` anywhere, scored by BOTH finders - keep twins clean of the sibling detector | none | none |
+| detectors | `.py` anywhere, scored by ALL THREE finders - keep twins clean of the sibling detectors | none | none |
 | claim_check | text is all non-`.json` files joined | `witnessed.json` `[{value, unit}]`, required | none |
 | envgate | CI file at `.github/workflows/*.yml` | `gates.json` `[{marker, env_var}]`, required | none |
 | golden | `data.json` (the computed values) | `golden.json` (frozen baseline), required | `rebaseline`: replays an intentional re-baseline with UPDATE on - the reason comes from a `reason.txt` helper, or from nowhere (refused). Without the option both update variables are scrubbed. |

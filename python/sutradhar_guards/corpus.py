@@ -616,6 +616,7 @@ for path in sorted(pathlib.Path(_TMP).rglob("*.py")):
     src = path.read_text(encoding="utf-8", errors="replace")
     hits += _guard.find_order_by_without_limit(src, path=str(path))
 hits += _guard.find_unresolved_relative_imports(_TMP)
+hits += _guard.find_test_only_helpers(_TMP)
 print("detectors: {} violation(s)".format(len(hits)))
 for hit in hits[:10]:
     print("  {}".format(hit.message if hasattr(hit, "message") else hit))
