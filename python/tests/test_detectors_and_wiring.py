@@ -63,6 +63,47 @@ def test_submodule_import_from_package_is_clean(tmp_path):
     assert find_unresolved_relative_imports(pkg) == []
 
 
+_BOM = b"\xef\xbb\xbf"
+
+
+def test_bom_prefixed_clean_file_is_silent(tmp_path):
+    # R25-2: read as utf-8 the mark reached the parser as a character, and
+    # a file Python imports and runs was reported as `does not parse`. The
+    # corpus sweep found it on swallow-behind-a-byte-order-mark's clean twin.
+    pkg = _mkpkg(tmp_path)
+    (pkg / "main.py").write_bytes(_BOM + b"from .util import helper, VALUE\n")
+    assert (pkg / "main.py").read_bytes().startswith(_BOM)
+    assert find_unresolved_relative_imports(pkg) == []
+    assert find_test_only_helpers(pkg) == []
+
+
+def test_bom_prefixed_file_with_a_real_unresolved_import_is_found(tmp_path):
+    # The other half: the mark must not hide a finding either. The one
+    # violation is the import, not a parse failure standing in for it.
+    pkg = _mkpkg(tmp_path)
+    (pkg / "main.py").write_bytes(_BOM + b"from .util import renamed_away\n")
+    v = find_unresolved_relative_imports(pkg)
+    assert [x.key.split("::")[1] for x in v] == ["from .util import renamed_away"]
+
+
+def test_bom_prefixed_module_still_exports_its_names(tmp_path):
+    # The target side of the import: a marked util.py that read as
+    # unparsable made its names unknowable, so a missing one went unseen.
+    pkg = _mkpkg(tmp_path)
+    (pkg / "util.py").write_bytes(_BOM + b"def helper():\n    return 1\n")
+    (pkg / "main.py").write_text("from .util import helper, renamed_away\n")
+    v = find_unresolved_relative_imports(pkg)
+    assert [x.key.split("::")[1] for x in v] == ["from .util import renamed_away"]
+
+
+def test_unparsable_package_file_is_named_not_clean(tmp_path):
+    pkg = _mkpkg(tmp_path)
+    (pkg / "main.py").write_text("def oops(:\n")
+    v = find_unresolved_relative_imports(pkg)
+    assert len(v) == 1 and v[0].key.endswith("::does not parse")
+    assert "not judged" in v[0].message
+
+
 # ── ORDER BY detector ───────────────────────────────────────────────────────
 
 def test_unbounded_order_by_is_flagged():
@@ -78,6 +119,22 @@ def test_bounded_order_by_is_clean():
 def test_fstring_order_by_is_seen():
     src = 'q = f"SELECT * FROM r WHERE t = {t} ORDER BY ts"\n'
     assert len(find_order_by_without_limit(src)) == 1
+
+
+def test_order_by_source_that_does_not_parse_is_not_clean():
+    # R25-2: this returned [] - the empty list a clean source returns - the
+    # exact shape R24-27 removed from the three lints.
+    v = find_order_by_without_limit("def oops(:\n", path="q.py")
+    assert [x.key for x in v] == ["q.py::does not parse"]
+    assert "not judged" in v[0].message
+
+
+def test_order_by_source_decoded_with_its_bom_is_judged():
+    # A caller that read the file as utf-8 hands over a leading U+FEFF.
+    marked = "\ufeff" + 'q = "SELECT * FROM readings ORDER BY ts"\n'
+    v = find_order_by_without_limit(marked, path="q.py")
+    assert len(v) == 1 and "ORDER BY with no LIMIT" in v[0].message
+    assert find_order_by_without_limit("\ufeff" + 'q = "SELECT 1"\n') == []
 
 
 # ── test-only helper detector (doctrine 8.2) ────────────────────────────────

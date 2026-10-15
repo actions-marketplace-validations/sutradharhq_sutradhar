@@ -613,7 +613,7 @@ def _run_detectors(tmp: Path, guard_home: Path, options: tuple,
 import pathlib
 hits = []
 for path in sorted(pathlib.Path(_TMP).rglob("*.py")):
-    src = path.read_text(encoding="utf-8", errors="replace")
+    src = path.read_text(encoding="utf-8-sig", errors="replace")
     hits += _guard.find_order_by_without_limit(src, path=str(path))
 hits += _guard.find_unresolved_relative_imports(_TMP)
 hits += _guard.find_test_only_helpers(_TMP)

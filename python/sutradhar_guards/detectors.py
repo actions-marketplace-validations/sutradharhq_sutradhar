@@ -62,6 +62,44 @@ def _numbered(key: str, seen: dict) -> str:
     return key if n == 1 else f"{key}#{n}"
 
 
+def _parse_source(source: str) -> tuple:
+    """(tree, None), or (None, why) when there is no tree.
+
+    One leading U+FEFF is dropped first: it is what a byte-order mark
+    becomes when a caller decodes the file as `utf-8`, the interpreter
+    drops it before it runs the file, and the parser refuses it as a
+    character (R25-2, the R24-27 class). Every parse failure the lints
+    name as not judged is caught here - a NUL byte is a ValueError on
+    3.9 and a SyntaxError later - so the instrument reports instead of
+    crashing (6.11), and the caller turns `why` into a violation, never
+    into the empty list a clean file returns (2.9).
+    """
+    if source.startswith("\ufeff"):
+        source = source[1:]
+    try:
+        return ast.parse(source), None
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        if isinstance(exc, SyntaxError):
+            at = f" at line {exc.lineno}" if exc.lineno else ""
+            return None, f"SyntaxError{at}: {exc.msg}"
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _parse_file(py: Path) -> tuple:
+    """`_parse_source` over a file read as the interpreter reads it.
+
+    `utf-8-sig`, the encoding swallow, interpolation and conflated-degrade
+    moved to in R24-27: a BOM-prefixed file is one Python imports and runs,
+    so it is judged, not reported as unparsable. A file that cannot be read
+    at all comes back as (None, why) like one that cannot be parsed.
+    """
+    try:
+        source = py.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        return None, f"could not be read ({type(exc).__name__}: {exc.strerror or exc})"
+    return _parse_source(source)
+
+
 def _import_text(node: ast.ImportFrom, only: str | None = None) -> str:
     """`from ..pkg.mod import a, b` - the matched text, normalised.
 
@@ -90,12 +128,11 @@ def find_unresolved_relative_imports(package_root: str | Path) -> list[Violation
         if "__pycache__" in str(py):
             continue
         seen: dict = {}
-        try:
-            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError as e:
+        tree, why = _parse_file(py)
+        if tree is None:
             violations.append(Violation(
                 f"{py}::does not parse",
-                f"{py}:{e.lineno}: does not parse: {e.msg}",
+                f"{py}: does not parse, so its imports were not judged: {why}",
             ))
             continue
         imports = sorted(
@@ -138,9 +175,8 @@ def _module_exports(mod_file: Path) -> set[str] | None:
     The residual - a relative import climbing above the scanned root to a
     module that does not parse - is recorded as deferred in round 24.
     """
-    try:
-        tree = ast.parse(mod_file.read_text(encoding="utf-8", errors="replace"))
-    except SyntaxError:
+    tree, _why = _parse_file(mod_file)
+    if tree is None:
         return None
     names: set[str] = set()
     star = False
@@ -208,11 +244,19 @@ def find_order_by_without_limit(
     query text>`` - the query is what the baseline is about, and unlike its
     line it does not move when somebody edits the imports above it. Pass
     ``path`` so the key names the file; the line stays in the message.
+
+    Source that does not parse returns one ``path::does not parse``
+    violation, never the empty list a clean source returns (R25-2): the
+    queries in it were not judged, and a ratchet must not read that as
+    none. A leading U+FEFF - a byte-order mark decoded as `utf-8` - is
+    dropped, as the interpreter drops it.
     """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
+    tree, why = _parse_source(source)
+    if tree is None:
+        return [Violation(
+            f"{path}::does not parse",
+            f"{path}: does not parse, so its queries were not judged: {why}",
+        )]
     found: list = []
     # Constants INSIDE an f-string are also visited by ast.walk; skip them
     # so a hit is counted once, on the JoinedStr.
@@ -314,15 +358,14 @@ def find_test_only_helpers(package_root: str | Path) -> list[Violation]:
         if "__pycache__" in str(py):
             continue
         is_test = _is_test_file(py, root)
-        try:
-            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError as e:
+        tree, why = _parse_file(py)
+        if tree is None:
             if not is_test:
                 unparsable_production = True
                 violations.append(Violation(
                     f"{py}::helper callers unknowable (does not parse)",
-                    f"{py}:{e.lineno}: does not parse, so no production "
-                    f"caller can be counted: {e.msg}",
+                    f"{py}: does not parse, so no production caller can be "
+                    f"counted: {why}",
                 ))
             continue
         (tests if is_test else prod).append((py, tree))
@@ -428,6 +471,24 @@ def selfcheck() -> bool:
         moved = find_unresolved_relative_imports(pkg)
         if {v.key for v in moved} != {v.key for v in found}:
             _fail("an added import line above a violation changed its key")
+        (pkg / "bad_name.py").unlink()
+
+        # R25-2, two pairs: a byte-order mark neither invents a finding nor
+        # hides one, and source that does not parse is never the empty list.
+        bom = b"\xef\xbb\xbf"
+        (pkg / "marked.py").write_bytes(bom + b"from .real import VALUE\n")
+        if find_unresolved_relative_imports(pkg):
+            _fail("a BOM-prefixed file with a resolving import was flagged")
+        (pkg / "marked.py").write_bytes(bom + b"from .real import MISSING\n")
+        if [v.key.split("::")[1] for v in find_unresolved_relative_imports(pkg)] \
+                != ["from .real import MISSING"]:
+            _fail("a BOM-prefixed file's unresolved import was not the one "
+                  "finding")
+    if find_order_by_without_limit("\ufeff" + 'q = "SELECT * FROM t"'):
+        _fail("a BOM-prefixed source with no ORDER BY was flagged")
+    if not find_order_by_without_limit("def (:\n"):
+        _fail("source that does not parse returned the empty list a clean "
+              "source returns")
 
     with tempfile.TemporaryDirectory() as td:
         app = Path(td)
@@ -455,7 +516,8 @@ def selfcheck() -> bool:
             "[detectors] selfcheck ok: ORDER BY (string + f-string) caught, "
             "LIMIT respected, unresolved module and name both caught, keys "
             "unchanged by lines inserted above them, test-only helper "
-            "flagged and a called one left alone"
+            "flagged and a called one left alone, a BOM-prefixed file "
+            "judged as the plain one is, unparsable source not clean"
         )
     return ok
 
