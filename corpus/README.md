@@ -98,6 +98,7 @@ python3 python/sutradhar_guards/corpus.py corpus/ --rounds docs/rounds/ \
   --backflow docs/backflow.md
 python3 python/sutradhar_guards/corpus.py corpus/ --case <id>
 python3 python/sutradhar_guards/corpus.py corpus/ --sweep <guard>
+python3 python/sutradhar_guards/corpus.py corpus/ --sweep-all
 ```
 
 `--case` scores one twin pair (MISSED before its guard exists is the
@@ -106,6 +107,11 @@ twin in the corpus - that is what catches a guard that flags everything.
 It prints how many twins it measured silent, found not applicable (the
 guard exited 2 or 3), flagged, and could not run; a sweep that measured
 zero twins exits 2, because reading nothing is not a pass.
+`--sweep-all` runs that sweep for every guard in the registry and is
+what CI runs (R25-4): per-case scoring never shows a guard another
+case's clean twin, so a guard flagging one stays invisible until a
+sweep is run. It exits 2 if any guard measured nothing, else 1 if any
+flagged a clean twin, else 0.
 
 ## Coverage
 

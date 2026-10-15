@@ -53,7 +53,15 @@ Usage:
     python corpus.py corpus/ --require-case-count
     python corpus.py corpus/ --case swallow-outage-as-data
     python corpus.py corpus/ --sweep swallow_lint
+    python corpus.py corpus/ --sweep-all
     python corpus.py --selfcheck
+
+`--sweep-all` is `--sweep` for every guard in the registry, in one run
+(R25-4): CI scored each case against its own guard and never swept, so a
+guard flagging another case's clean twin stayed invisible until somebody
+ran `--sweep` by hand - detectors flagged the byte-order-mark case's clean
+twin for a release that way. Every guard must measure at least one twin; a
+registry guard no clean twin exercises has not been swept.
 
 Exit 0 clean, 1 a finding, 2 the check could not run: an unknown flag, an
 empty corpus, a manifest that cannot be read exactly, or any INVALID case.
@@ -1328,6 +1336,21 @@ def _selfcheck_body() -> bool:
                 f"silence it never measured read as a pass: {said!r}"
             )
 
+        # The sweep-all pair (R25-4), over a registry narrowed to the
+        # guards this one-case corpus can feed: swallow alone measures its
+        # twin and passes; with ci_step_lint beside it, the guard that
+        # measured nothing makes the whole run 2, never a quiet 0.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_ok = _run_sweep_all(load_cases(one), False, ("swallow_lint",))
+            rc_zero = _run_sweep_all(load_cases(one), False,
+                                     ("swallow_lint", "ci_step_lint"))
+        if rc_ok != 0:
+            problems.append(f"a sweep-all whose one guard measured a silent "
+                            f"twin exited {rc_ok}, not 0")
+        if rc_zero != 2:
+            problems.append(f"a sweep-all with one guard that measured no "
+                            f"twin exited {rc_zero}, not 2")
+
     for problem in problems:
         print(f"[corpus] SELFCHECK FAILED: {problem}")
     if not problems:
@@ -1337,7 +1360,7 @@ def _selfcheck_body() -> bool:
               "one short of its declared case count failed, a required "
               "declaration that was missing exited 2, "
               "a sweep that measured a twin passed and one that measured none "
-              "exited 2")
+              "exited 2, a sweep-all passed only when every guard measured")
     return not problems
 
 
@@ -1349,9 +1372,9 @@ def _fail(problems: list[str]) -> bool:
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-_KNOWN_FLAGS = {"--case", "--sweep", "--doctrine", "--rounds", "--backflow",
-                "--json", "--require-case-count", "--selfcheck", "--help",
-                "-h"}
+_KNOWN_FLAGS = {"--case", "--sweep", "--sweep-all", "--doctrine", "--rounds",
+                "--backflow", "--json", "--require-case-count", "--selfcheck",
+                "--help", "-h"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1365,6 +1388,7 @@ def main(argv: list[str] | None = None) -> int:
 
     as_json = "--json" in argv
     require_count = "--require-case-count" in argv
+    sweep_all = "--sweep-all" in argv
     case_id: str | None = None
     sweep: str | None = None
     doctrine = "DOCTRINE.md"
@@ -1401,6 +1425,11 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     root = Path(positional[0] if positional else "corpus")
+    if sweep_all and (sweep is not None or case_id is not None):
+        print("[corpus] --sweep-all already sweeps every guard; it does not "
+              "combine with --sweep or --case. Nothing was checked.",
+              file=sys.stderr)
+        return 2
 
     if not selfcheck():
         return 1
@@ -1429,6 +1458,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_one(cases, case_id, as_json)
     if sweep is not None:
         return _run_sweep(cases, sweep, as_json)
+    if sweep_all:
+        return _run_sweep_all(cases, as_json)
     return _run_all(cases, root, known_rules, as_json, require_count)
 
 
@@ -1531,6 +1562,34 @@ def _run_sweep(cases: list[Case], guard_name: str, as_json: bool) -> int:
                           "invalid": unmeasurable, "exit": code,
                           "measured_silent": silent,
                           "not_applicable": not_applicable},
+                         sort_keys=True))
+    return code
+
+
+def _run_sweep_all(cases: list[Case], as_json: bool,
+                   guards: tuple | None = None) -> int:
+    """`_run_sweep` for every registry guard (R25-4). The exit follows the
+    single sweep's own precedence, worst first: 2 if any guard could not
+    be measured or measured zero twins, else 1 if any guard flagged a
+    clean twin, else 0. `guards` narrows the registry for the selfcheck
+    only; the CLI always sweeps all of it."""
+    names = sorted(GUARDS) if guards is None else list(guards)
+    codes = {name: _run_sweep(cases, name, as_json) for name in names}
+    flagged = sorted(n for n, c in codes.items() if c == 1)
+    unmeasured = sorted(n for n, c in codes.items() if c not in (0, 1))
+    print(f"[corpus] sweep-all: {len(names)} guard(s) over {len(cases)} "
+          f"clean twin(s) - {len(names) - len(flagged) - len(unmeasured)} "
+          f"silent, {len(flagged)} flagged a clean twin, {len(unmeasured)} "
+          f"could not be measured")
+    for name in flagged:
+        print(f"[corpus] SWEEP-ALL-FLAGGED {name}")
+    for name in unmeasured:
+        print(f"[corpus] SWEEP-ALL-UNMEASURED {name} (exit {codes[name]}): "
+              f"not a pass (2.9)")
+    code = 2 if unmeasured else 1 if flagged else 0
+    if as_json:
+        print(json.dumps({"sweep_all": codes, "flagged": flagged,
+                          "unmeasured": unmeasured, "exit": code},
                          sort_keys=True))
     return code
 
