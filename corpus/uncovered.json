@@ -21,6 +21,5 @@
   "6.8": "loop queue: handler whose error branch blames the subject for its own crash",
   "6.9": "loop queue: verdict whose word contradicts its number",
   "7.2": "loop queue: documented control existing only in docstrings",
-  "7.4": "loop queue: record that changes an earlier one without saying extends or revokes",
-  "8.2": "loop queue: helper with a test and no caller"
+  "7.4": "loop queue: record that changes an earlier one without saying extends or revokes"
 }

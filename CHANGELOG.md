@@ -6,6 +6,48 @@ evolve freely within a minor version. Tags mark releases; copy-in users
 upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 <repo>`, run from a newer checkout, says which tag that was.
 
+## Unreleased
+
+**`detectors` finds helpers whose only caller is a test** (round 25,
+R25-1, doctrine 8.2).
+
+- `find_test_only_helpers(package_root)` flags a module-level `_name`
+  function that a test file references and no production file does. A test
+  is not a caller. Public names, decorated functions, names in `__all__`
+  and helpers nothing references are left alone. A production file that
+  does not parse makes it refuse, with its own violation, instead of
+  flagging. Corpus case `helper-with-test-and-no-caller`; declared count 57.
+
+**Every file a guard parses is read as `utf-8-sig`, and a class ratchet
+keeps it that way** (round 25, R25-2, R25-3, doctrine 2.9).
+
+- R24-27 fixed three lints and missed two siblings. `detectors` read
+  source as `utf-8`, so a BOM-prefixed file that Python imports was
+  reported `does not parse`. `framework_only` reported a BOM-prefixed
+  guard as `could not parse`. Both now read `utf-8-sig`. `detectors` also
+  drops a leading U+FEFF from source a caller decoded as `utf-8`, and
+  catches the parse failures the lints name as not judged (a NUL byte is a
+  `ValueError` on 3.9), so it reports instead of crashing.
+- `python/tests/test_parse_encoding_ratchet.py` walks every guard module
+  by AST. It follows each argument of `ast.parse`, across helper functions
+  and modules, back to where the text was read, and fails on any encoding
+  but `utf-8-sig`. It names all three R24-27 sites in the pre-fix tree.
+- **Migration: `find_order_by_without_limit` returns one
+  `<path>::does not parse` violation for source that does not parse,
+  where it returned `[]`.** A ratchet over such a file goes red with that
+  key. Fix the file, or bank the key; it is position-free.
+  `find_unresolved_relative_imports` and `find_test_only_helpers` keep
+  their keys, and their messages now say why the file was not judged.
+
+**CI sweeps every guard over every clean twin** (round 25, R25-4,
+doctrine 6.10).
+
+- `corpus.py --sweep-all` runs `--sweep` for every guard in the registry:
+  2 if any guard measured nothing, else 1 if any flagged a clean twin,
+  else 0. The selftest job runs it. Per-case scoring never shows a guard
+  another case's clean twin, and that blind spot is how R25-2 got through
+  a release. About 35 s on an M2 laptop for 15 guards over 57 cases.
+
 ## v0.6.1 - 2026-10-03
 
 **The Action's description fits the GitHub Marketplace.**
