@@ -434,3 +434,91 @@ def test_the_byte_order_mark_case_really_materializes_the_mark(tmp_path):
         out = corpus.materialize(case, tmp_path / twin, twin)
         data = (out / "app" / "reader.py").read_bytes()
         assert data.startswith(b"\xef\xbb\xbf"), (twin, data[:8])
+
+
+# ── --sweep-all: every registry guard over every clean twin (R25-4) ─────────
+
+def _registry(monkeypatch, **exit_codes) -> None:
+    """Replace the registry with fake guards exiting the given codes, and stub
+    the embedded selfcheck, which needs the real swallow and ci_step guards.
+    The cases name `swallow_lint`, so a silent fake keeps that name loadable."""
+    monkeypatch.setattr(corpus, "selfcheck", lambda: True)
+    exit_codes = {"swallow_lint": 0, **exit_codes}
+    monkeypatch.setattr(corpus, "GUARDS", {
+        name: corpus._Spec(
+            name, "cli",
+            (lambda rc: lambda tmp, options: [
+                sys.executable, "-c", f"raise SystemExit({rc})"])(rc),
+            (1,), (0,))
+        for name, rc in exit_codes.items()})
+
+
+def test_sweep_all_passes_only_when_every_guard_measured_silence(
+        tmp_path, monkeypatch):
+    """Mutation: `code = 2 if unmeasured else 1 if flagged else 0` changed
+    to `code = 0` leaves this green and turns the next two red."""
+    _two_cases(tmp_path)
+    _registry(monkeypatch, quiet_a=0, quiet_b=0)
+    code, said = _run([str(tmp_path), "--sweep-all", "--json"])
+    assert code == 0, said
+    assert "3 guard(s) over 2 clean twin(s) - 3 silent, 0 flagged" in said
+    assert _json_of(said)["sweep_all"] == {
+        "quiet_a": 0, "quiet_b": 0, "swallow_lint": 0}
+
+
+def test_sweep_all_names_the_guard_that_flagged_another_cases_clean_twin(
+        tmp_path, monkeypatch):
+    """The blind spot itself: per-case scoring never runs a guard over a
+    case that is not its own, so only a sweep sees this."""
+    _two_cases(tmp_path)
+    _registry(monkeypatch, quiet=0, noisy=1)
+    code, said = _run([str(tmp_path), "--sweep-all", "--json"])
+    assert code == 1, said
+    assert "SWEEP-ALL-FLAGGED noisy" in said
+    assert _json_of(said)["flagged"] == ["noisy"]
+
+
+def test_sweep_all_with_a_guard_that_measured_nothing_is_not_a_pass(
+        tmp_path, monkeypatch):
+    """2 outranks 1, as in a single sweep: a guard that read no twin has not
+    been swept, whatever the others found."""
+    _two_cases(tmp_path)
+    _registry(monkeypatch, noisy=1, blind=2)
+    code, said = _run([str(tmp_path), "--sweep-all", "--json"])
+    assert code == 2, said
+    assert "SWEEP-ALL-UNMEASURED blind" in said
+
+
+def test_sweep_all_reads_the_registry_not_a_list_of_its_own(
+        tmp_path, monkeypatch):
+    """A guard added to GUARDS is swept with no other edit - the reason this
+    is one flag and not one CI step per guard. Mutation: `names =
+    sorted(GUARDS)` replaced with the fifteen names spelled out turns this
+    red (the added guard is never run)."""
+    _two_cases(tmp_path)
+    monkeypatch.setattr(corpus, "selfcheck", lambda: True)
+    monkeypatch.setitem(corpus.GUARDS, "added_later", corpus._Spec(
+        "added_later", "cli",
+        lambda tmp, options: [sys.executable, "-c", "raise SystemExit(1)"],
+        (1,), (0,)))
+    code, said = _run([str(tmp_path), "--sweep-all", "--json"])
+    assert "added_later" in _json_of(said)["sweep_all"], said
+    assert "SWEEP-ALL-FLAGGED added_later" in said
+
+
+def test_sweep_all_refuses_to_combine_with_sweep_or_case(tmp_path):
+    _two_cases(tmp_path)
+    for extra in (["--sweep", "swallow_lint"], ["--case", "a"]):
+        code, said = _run([str(tmp_path), "--sweep-all"] + extra)
+        assert code == 2 and "does not combine" in said, (extra, said)
+
+
+def test_ci_sweeps_every_guard_over_the_corpus():
+    """R25-4 is closed only while CI runs the flag: read the step out of the
+    workflow. Mutation: deleting the step turns this red."""
+    wf = (Path(__file__).resolve().parents[2] / ".github" / "workflows"
+          / "selftest.yml").read_text(encoding="utf-8")
+    runs = [line.split("run:", 1)[1].strip() for line in wf.splitlines()
+            if line.strip().startswith("run:")]
+    assert any("python/sutradhar_guards/corpus.py corpus/" in r
+               and "--sweep-all" in r for r in runs), runs

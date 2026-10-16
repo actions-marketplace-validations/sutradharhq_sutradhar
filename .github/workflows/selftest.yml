@@ -94,6 +94,14 @@ jobs:
         # cases load; --require-case-count makes deleting the declaration
         # itself an exit 2.
         run: python python/sutradhar_guards/corpus.py corpus/ --rounds docs/rounds/ --backflow docs/backflow.md --require-case-count
+      - name: Every guard is silent on every clean twin in the corpus
+        # R25-4: the step above scores each case against its own guard only,
+        # so a guard that flags ANOTHER case's clean twin was invisible here.
+        # detectors flagged the byte-order-mark case's clean twin from v0.6.0
+        # until round 25 ran `--sweep detectors` by hand (R25-2). One flag
+        # reads the registry, so a guard added later is swept with no edit
+        # here. About 35 s for 15 guards over 57 cases on an M2 laptop.
+        run: python python/sutradhar_guards/corpus.py corpus/ --sweep-all --rounds docs/rounds/ --backflow docs/backflow.md
       - name: verify-guard selfcheck (a decorative guard must be caught)
         # Builds real repos with a real guard and a deliberately decorative
         # one and requires the tool to tell them apart. A verifier that
