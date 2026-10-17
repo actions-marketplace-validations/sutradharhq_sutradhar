@@ -22,9 +22,17 @@ only shrink: fix a swallow, rerun ``--update-baseline``, and the floor
 drops. You can adopt this on a codebase with hundreds of existing swallows
 on day one and still never regress.
 
+A baseline in the same diff as the code it excuses is no ratchet: a change
+can add a swallow and record it in one step, and the gate reads its own new
+floor. ``--base-baseline FILE`` names the base branch's copy of the baseline;
+an entry the current baseline adds, or a count it raises, against that copy
+is a finding (B-64, after Perplexity SPACE's archcheck). Lowering or removing
+an entry is silent. The GitHub Action passes the base copy on pull requests.
+
 Usage:
     python swallow_lint.py src/                     # gate against baseline
     python swallow_lint.py src/ --update-baseline   # record today's floor
+    python swallow_lint.py src/ --base-baseline base.json  # also: no growth
     python swallow_lint.py --selfcheck              # prove the detector works
 
 Exit 0 no swallow beyond the baseline, 1 a new swallow, 2 the check could
@@ -243,6 +251,25 @@ def _selfcheck_body() -> bool:
                 f"would be refusing everything: {said!r}"
             )
 
+    # B-64, in a pair: a baseline that grew against the base branch's copy
+    # is a finding, and the same baseline against an equal copy passes, or
+    # the growth check could be failing everything. An unreadable base copy
+    # is could-not-run, never an empty floor that makes everything "added".
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "clean.py").write_text("x = 1\n", encoding="utf-8")
+        cur, base = root / "cur.json", root / "base.json"
+        cur.write_text('{"clean.py": 1}', encoding="utf-8")
+        args = [str(root), "--baseline", str(cur), "--base-baseline", str(base)]
+        for base_text, want in (("{}", 1), ('{"clean.py": 1}', 0),
+                                ('{"clean.py": 0}', 1), ("not json", 2)):
+            base.write_text(base_text, encoding="utf-8")
+            rc, said = cli(args)
+            if rc != want:
+                problems.append(f"baseline {{'clean.py': 1}} against base "
+                                f"copy {base_text!r} exited {rc}, not {want}: "
+                                f"{said!r}")
+
     # R24-27, two pairs: a byte-order mark does not hide a finding (the BOM
     # twin finds what the plain twin finds), and a file that does not parse
     # is NOT check_fileD - never the empty list a clean file returns.
@@ -276,8 +303,9 @@ def _selfcheck_body() -> bool:
         print(
             "[swallow-lint] selfcheck ok: silent swallow caught, handled "
             "exception passed, a directory with no Python file refused with "
-            "exit 2, one clean file passed, a BOM-prefixed swallow found as "
-            "the plain one is, an unparsable file not judged"
+            "exit 2, one clean file passed, a baseline grown against the base "
+            "branch's copy flagged and an equal one passed, a BOM-prefixed "
+            "swallow found as the plain one is, an unparsable file not judged"
         )
     return not problems
 
@@ -392,6 +420,35 @@ def _walk(paths: list, vendor=None) -> tuple:
     return named, walked, linked_dirs, unjudged, skipped_vendor
 
 
+def load_counts(path: Path) -> dict:
+    """A swallow baseline: ``{file: count}``. Raises ValueError saying why
+    it is not one, so a malformed file is "could not run", never an empty
+    floor."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path}: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(data, dict) or not all(
+            isinstance(k, str) and type(v) is int and v >= 0
+            for k, v in data.items()):
+        raise ValueError(f"{path}: not an object of file -> count")
+    return data
+
+
+def baseline_growth(current: dict, base: dict) -> list:
+    """What ``current`` allows beyond ``base``, the base branch's copy: an
+    added entry or a raised count, one line each (B-64). Lowered and removed
+    entries are the ratchet working and are not listed."""
+    grown = []
+    for rel, n in sorted(current.items()):
+        was = base.get(rel)
+        if was is None:
+            grown.append(f"{rel}: added with {n}")
+        elif n > was:
+            grown.append(f"{rel}: raised from {was} to {n}")
+    return grown
+
+
 def _verdict(found: bool, unjudged: bool) -> int:
     """1 a finding, else 2 a file not judged, else 0 (R24-27). A finding is
     a verdict that holds whatever the unjudged files contain, and must not
@@ -481,7 +538,8 @@ def _is_vendor(path: Path, root: Path) -> bool:
 
 
 _KNOWN_FLAGS = {
-    "--allow-call", "--baseline", "--selfcheck", "--update-baseline",
+    "--allow-call", "--baseline", "--base-baseline", "--selfcheck",
+    "--update-baseline",
     "--include-vendor", "--help", "-h",
 }
 
@@ -495,13 +553,19 @@ def main(argv: list[str] | None = None) -> int:
     update = "--update-baseline" in argv
     include_vendor = "--include-vendor" in argv
     baseline_path = Path("swallow_baseline.json")
+    base_path: "Path | None" = None
     extra_calls: set[str] = set()
     paths: list[Path] = []
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a in ("--baseline", "--base-baseline", "--allow-call") and i + 1 >= len(argv):
+            print(f"[swallow-lint] {a} needs a value", file=sys.stderr)
+            return 2
         if a == "--baseline":
             baseline_path = Path(argv[i + 1]); i += 2
+        elif a == "--base-baseline":
+            base_path = Path(argv[i + 1]); i += 2
         elif a == "--allow-call":
             extra_calls.add(argv[i + 1]); i += 2
         elif a.startswith("--"):
@@ -520,8 +584,30 @@ def main(argv: list[str] | None = None) -> int:
     if not paths:
         paths = [Path("src")]
 
+    if update and base_path is not None:
+        print("[swallow-lint] --base-baseline checks a baseline and "
+              "--update-baseline writes one; they are not combined.",
+              file=sys.stderr)
+        return 2
+
     if not selfcheck():
         return 1
+
+    # B-64: read both baselines before scanning, so a base copy that cannot
+    # be read stops the run as could-not-run instead of judging growth
+    # against nothing.
+    grown: list = []
+    if base_path is not None:
+        try:
+            base_counts = load_counts(base_path)
+            current = (load_counts(baseline_path)
+                       if baseline_path.exists() else {})
+        except ValueError as exc:
+            print(f"[swallow-lint] cannot compare the baseline with the base "
+                  f"branch's copy: {exc}. Nothing was judged (2.9).",
+                  file=sys.stderr)
+            return 2
+        grown = baseline_growth(current, base_counts)
 
     named, walked, linked_dirs, unjudged, skipped_vendor = _walk(
         paths, None if include_vendor else _is_vendor)
@@ -619,11 +705,18 @@ def main(argv: list[str] | None = None) -> int:
         if counts.get(rel, 0) < allowed and rel not in not_judged
     ]
 
-    code = _verdict(bool(regressions), bool(unjudged))
+    code = _verdict(bool(regressions or grown), bool(unjudged))
     if regressions:
         print("\n[swallow-lint] NEW silent swallow(s) beyond baseline:\n")
         print("\n".join(regressions))
         print()
+    if grown:
+        print(f"\n[swallow-lint] the baseline GREW against the base branch's "
+              f"copy ({base_path}); a change cannot raise the floor it is "
+              f"judged against (2.1, B-64):\n")
+        print("\n".join(f"  {g}" for g in grown))
+        print("\nFix the swallow, or land the baseline change on its own "
+              "where it is reviewed as one.\n")
     _say_unjudged("swallow-lint", unjudged, _rel, code == 2)
     if code:
         return code

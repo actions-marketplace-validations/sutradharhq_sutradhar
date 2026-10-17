@@ -55,6 +55,16 @@ each skip still prints the guard's own sentence, raises a warning annotation
 and a row in the step summary, and a run in which every selected guard was
 skipped fails anyway - nothing was checked, and that is not a pass (2.9).
 
+On a pull request the two ratchet baselines are also compared with the base
+branch's copies (`baseline-vs-base`, default `check`): a pull request that adds
+a swallow and banks it in the same diff is a finding, because otherwise the
+gate reads the floor the change itself just raised (B-64). The base copy is
+read with `git cat-file` from the base commit the event names, fetched at
+depth 1 if the checkout does not hold it; it is data, parsed as JSON by the
+guard, and nothing from it is run. A base copy that cannot be had is a named
+could-not-run row, under the same `on-cannot-run` as everything else. On any
+other event there is no base to compare with, and the summary says so.
+
 Usage (the action sets these; locally you can too):
 
     SUTRADHAR_PATHS=src python3 action/run_guards.py
@@ -66,6 +76,7 @@ run could not be made: an input refused, or a guard could not run under
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -110,6 +121,7 @@ ENV = {
     "design-dir": "SUTRADHAR_DESIGN_DIR",
     "tests-dir": "SUTRADHAR_TESTS_DIR",
     "rounds-dir": "SUTRADHAR_ROUNDS_DIR",
+    "baseline-vs-base": "SUTRADHAR_BASELINE_VS_BASE",
 }
 DEFAULTS = {
     "guards": ",".join(DEFAULT_GUARDS),
@@ -123,7 +135,17 @@ DEFAULTS = {
     "design-dir": "docs/design",
     "tests-dir": "tests",
     "rounds-dir": "docs/rounds",
+    "baseline-vs-base": "check",
 }
+
+#: guard -> (baseline input, the file the guard reads when none is named,
+#: what an empty baseline of its shape is). B-64.
+RATCHETS = {
+    "swallow": ("swallow-baseline", "swallow_baseline.json", "{}"),
+    "conflated-degrade": ("conflated-degrade-baseline",
+                          "conflated_degrade_baseline.json", "[]"),
+}
+_SHA_RX = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 #: A path is letters, digits, and `. _ / -`, and does not start with `-`.
 #: Narrow on purpose: everything outside it is either a shell metacharacter
@@ -148,6 +170,17 @@ PYTHON = (sys.executable, "-I")
 def _python(*args: str) -> list:
     """argv for an isolated interpreter running ``args``."""
     return [*PYTHON, *args]
+
+
+#: The only other program this driver starts: git, to read the base
+#: branch's copy of a baseline. `cat-file` applies no filter, textconv or
+#: attribute from the pull request's tree, and no hook runs on it or fetch.
+GIT = ("git", "-c", "core.hooksPath=/dev/null")
+
+
+def _git(*args: str) -> list:
+    """argv for git running ``args``."""
+    return [*GIT, *args]
 
 
 #: Runs one guard as `python3 <guard> <args>` would - same argv, the guard's
@@ -302,6 +335,11 @@ def read_config(environ: "dict[str, str]") -> dict:
             raise Refused(f"input `{key}` names {single[key]}, which is not "
                           f"a file. Nothing was run.")
 
+    vs_base = raw["baseline-vs-base"]
+    if vs_base not in ("check", "off"):
+        raise Refused(f"input `baseline-vs-base` is {vs_base!r}; it is "
+                      f"`check` or `off`. Nothing was run.")
+
     kw = raw["interpolation-keywords"]
     if kw and not _KEYWORDS_RX.fullmatch(kw):
         raise Refused(f"input `interpolation-keywords` is {kw!r}; it is a "
@@ -309,7 +347,7 @@ def read_config(environ: "dict[str, str]") -> dict:
                       f"Nothing was run.")
 
     return {"guards": guards, "policy": policy, "paths": paths,
-            "keywords": kw, **single}
+            "keywords": kw, "baseline-vs-base": vs_base, **single}
 
 
 def plan(cfg: dict) -> list:
@@ -352,6 +390,74 @@ def plan(cfg: dict) -> list:
     return out
 
 
+def _base_sha(environ: "dict[str, str]") -> "tuple[str | None, str]":
+    """(the base commit of this pull request, or None with the reason)."""
+    if environ.get("GITHUB_EVENT_NAME") not in ("pull_request",
+                                                "pull_request_target"):
+        return None, ("this run is not for a pull request, so there is no "
+                      "base branch to compare the baselines with")
+    try:
+        with open(environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
+            sha = json.load(fh)["pull_request"]["base"]["sha"]
+    except (KeyError, OSError, ValueError, TypeError) as exc:
+        return None, (f"the pull request event names no readable base "
+                      f"commit ({type(exc).__name__})")
+    if not isinstance(sha, str) or not _SHA_RX.fullmatch(sha):
+        return None, "the pull request event's base commit is not a hash"
+    return sha, ""
+
+
+def _git_ok(*args: str) -> bool:
+    try:
+        return subprocess.run(_git(*args), stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=120,
+                              env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+                              ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def base_copy(guard: str, cfg: dict, sha: str, workdir: Path
+              ) -> "tuple[str | None, str | None]":
+    """(path of the base branch's copy of ``guard``'s baseline, or None;
+    a could-not-run sentence, or None). (None, None): no baseline is in use,
+    so there is nothing that could have grown."""
+    key, default, empty = RATCHETS[guard]
+    current = Path(cfg[key] or default)
+    if not current.is_file():
+        return None, None
+    try:
+        rel = current.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return None, (f"{guard}: the baseline {current} is outside the "
+                      f"checkout, so the base branch has no copy of it to "
+                      f"compare with; nothing was compared")
+    if not _git_ok("cat-file", "-e", f"{sha}^{{commit}}"):
+        _git_ok("fetch", "--no-tags", "--depth=1", "origin", sha)
+        if not _git_ok("cat-file", "-e", f"{sha}^{{commit}}"):
+            return None, (f"{guard}: the base commit {sha[:12]} is not in this "
+                          f"checkout and could not be fetched, so the baseline "
+                          f"was not compared with the base branch's copy")
+    out = workdir / f"{guard}-base.json"
+    if not _git_ok("cat-file", "-e", f"{sha}:{rel}"):
+        # The base branch had no baseline: its floor was empty, and every
+        # entry this one holds is new.
+        out.write_text(empty + "\n", encoding="utf-8")
+        return str(out), None
+    try:
+        blob = subprocess.run(_git("cat-file", "blob", f"{sha}:{rel}"),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, (f"{guard}: reading the base branch's {rel} failed "
+                      f"({type(exc).__name__}); nothing was compared")
+    if blob.returncode != 0:
+        return None, (f"{guard}: git could not read the base branch's {rel} "
+                      f"(exit {blob.returncode}); nothing was compared")
+    out.write_bytes(blob.stdout)
+    return str(out), None
+
+
 def classify(code: int) -> str:
     """pass | finding | cannot-run | crashed, from the exit code alone.
 
@@ -368,8 +474,30 @@ def _last_sentence(output: str) -> str:
 
 
 def run(cfg: dict, environ: "dict[str, str]") -> int:
+    with tempfile.TemporaryDirectory() as workdir:
+        return _run(cfg, environ, Path(workdir))
+
+
+def _run(cfg: dict, environ: "dict[str, str]", workdir: Path) -> int:
     results = []  # (guard, verdict, sentence)
+    ratchets = [g for g in cfg["guards"] if g in RATCHETS]
+    sha, vs_base_note = None, ""
+    if ratchets and cfg["baseline-vs-base"] == "off":
+        vs_base_note = "baseline-vs-base is `off`"
+    elif ratchets:
+        sha, vs_base_note = _base_sha(environ)
+    if vs_base_note:
+        _say(f"baselines not compared with a base branch: {vs_base_note}")
     for guard, args, pre in plan(cfg):
+        if sha and guard in RATCHETS and pre is None:
+            copy, why = base_copy(guard, cfg, sha, workdir)
+            if why:
+                _say(why)
+                results.append((f"{guard} baseline vs base", "cannot-run", why))
+            elif copy:
+                if not cfg[RATCHETS[guard][0]]:
+                    args = args + ["--baseline", RATCHETS[guard][1]]
+                args = args + ["--base-baseline", copy]
         print(f"::group::sutradhar {guard}", flush=True)
         if pre is not None:
             print(pre, flush=True)
@@ -441,8 +569,12 @@ def run(cfg: dict, environ: "dict[str, str]") -> int:
 
     summary = environ.get("GITHUB_STEP_SUMMARY")
     if summary:
-        rows = ["### Sutradhar guards", "", f"**{headline}**", "",
-                "| guard | verdict |", "| --- | --- |"]
+        rows = ["### Sutradhar guards", "", f"**{headline}**", ""]
+        if vs_base_note:
+            # This script's own words, never the pull request's.
+            rows += [f"Baselines were not compared with a base branch: "
+                     f"{vs_base_note}.", ""]
+        rows += ["| guard | verdict |", "| --- | --- |"]
         for guard, verdict, sentence in results:
             # The sentence is the guard's last line, which quotes the pull
             # request; it is escaped to inert text. Guard names and verdict
@@ -480,6 +612,8 @@ def selfcheck() -> bool:
         problems.append("a misspelled guard was accepted")
     if not refused({"SUTRADHAR_ON_CANNOT_RUN": "ignore"}):
         problems.append("on-cannot-run accepted a third value")
+    if not refused({"SUTRADHAR_BASELINE_VS_BASE": "skip"}):
+        problems.append("baseline-vs-base accepted a third value")
     cfg = read_config({})
     if cfg["guards"] != list(DEFAULT_GUARDS) or cfg["policy"] != "fail":
         problems.append(f"defaults drifted: {cfg['guards']} {cfg['policy']}")
@@ -521,7 +655,8 @@ def selfcheck() -> bool:
         print("[sutradhar-action] selfcheck ok: metacharacter and flag-shaped "
               "paths refused, plain paths accepted, framework-only gates and "
               "unknown guards refused, defaults are the four source/CI guards "
-              "with on-cannot-run fail, an exception escaping a guard reads "
+              "with on-cannot-run fail, baseline-vs-base refuses a third "
+              "value, an exception escaping a guard reads "
               "as crashed and a traceback-shaped line in its output does "
               "not, summary text escaped inert")
     return not problems

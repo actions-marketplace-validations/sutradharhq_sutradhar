@@ -13,6 +13,7 @@ already trusts for workflows - and the rest with line patterns over files
 whose shape this repository controls. Each test's docstring names the
 mutation that was shown to turn it red.
 """
+import json
 import os
 import re
 import subprocess
@@ -454,6 +455,9 @@ def test_every_interpreter_the_driver_spells_is_built_isolated():
     import ast
     tree = ast.parse(DRIVER.read_text())
     assert tuple(run_guards.PYTHON) == (sys.executable, "-I")
+    # B-64 added one other program, git, and only to read the base branch's
+    # baseline: its argv is built in one place too, and never runs python.
+    assert run_guards.GIT[0] == "git" and "python" not in " ".join(run_guards.GIT)
     spawns = 0
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -462,7 +466,7 @@ def test_every_interpreter_the_driver_spells_is_built_isolated():
             spawns += 1
             first = node.args[0] if node.args else None
             ok = (isinstance(first, ast.Call) and isinstance(first.func, ast.Name)
-                  and first.func.id == "_python")
+                  and first.func.id in ("_python", "_git"))
             if isinstance(first, ast.Name):  # `cmd`, built by an assignment
                 assigns = [a for a in ast.walk(tree) if isinstance(a, ast.Assign)
                            and any(isinstance(t, ast.Name) and t.id == first.id
@@ -471,7 +475,8 @@ def test_every_interpreter_the_driver_spells_is_built_isolated():
                     isinstance(a.value, ast.Call)
                     and isinstance(a.value.func, ast.Name)
                     and a.value.func.id == "_python" for a in assigns)
-            assert ok, f"line {node.lineno}: an interpreter not built by _python()"
+            assert ok, (f"line {node.lineno}: a process not built by "
+                        f"_python() or _git()")
     assert spawns >= 2, spawns  # run() and the selfcheck; zero would be vacuous
     executable_uses = [n.lineno for n in ast.walk(tree)
                        if isinstance(n, ast.Attribute) and n.attr == "executable"]
@@ -626,3 +631,107 @@ def test_the_marketplace_description_fits_its_limit():
         f"description is {len(description)} characters; the Marketplace "
         f"requires fewer than 125: {description!r}")
 
+
+
+# ── B-64: a pull request cannot bank the defect it adds ─────────────────────
+
+_SWALLOW = ("def f(s):\n    try:\n        return s.read()\n"
+            "    except Exception:\n        pass\n")
+
+
+def _git_repo(root: Path) -> "tuple[Path, str]":
+    """A base commit: one clean file and an empty swallow baseline. Returns
+    (the repository, the base commit's hash)."""
+    def git(*a):
+        return subprocess.run(["git", "-C", str(root), "-c", "user.name=t",
+                               "-c", "user.email=t@example.invalid", *a],
+                              check=True, capture_output=True, text=True)
+    root.mkdir()
+    git("init", "-q")
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("x = 1\n")
+    (root / "src" / "other.py").write_text("y = 1\n")
+    (root / "swallow_baseline.json").write_text("{}\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    return root, git("rev-parse", "HEAD").stdout.strip()
+
+
+def _pr_driver(tree: Path, sha: str, extra: "dict | None" = None):
+    event = tree.parent / f"{tree.name}-event.json"
+    event.write_text(json.dumps({"pull_request": {"base": {"sha": sha}}}))
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SUTRADHAR_", "GITHUB_"))}
+    env.update({"SUTRADHAR_PATHS": "src",
+                "SUTRADHAR_GUARDS": "swallow,conflated-degrade",
+                "GITHUB_EVENT_NAME": "pull_request",
+                "GITHUB_EVENT_PATH": str(event),
+                "GITHUB_STEP_SUMMARY": str(tree.parent / f"{tree.name}.md")})
+    env.update(extra or {})
+    return subprocess.run([sys.executable, "-I", str(DRIVER)], cwd=tree,
+                          env=env, capture_output=True, text=True, timeout=120)
+
+
+def test_a_pull_request_that_banks_its_own_swallow_is_red(tmp_path):
+    """B-64, as a pair from the pull request's checkout. The head adds a
+    swallow and records it in swallow_baseline.json in the same diff: red,
+    naming the growth. The same head with the comparison `off` is green -
+    which is the hole: the gate read the floor the change had just raised.
+
+    Mutation: in swallow_lint.main, `bool(regressions or grown)` ->
+    `bool(regressions)` - the first half goes green, red.
+    """
+    tree, sha = _git_repo(tmp_path / "repo")
+    (tree / "src" / "app.py").write_text(_SWALLOW)
+    (tree / "swallow_baseline.json").write_text('{"src/app.py": 1}\n')
+    r = _pr_driver(tree, sha)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "GREW against the base branch" in r.stdout
+    assert "src/app.py: added with 1" in r.stdout
+    off = _pr_driver(tree, sha, {"SUTRADHAR_BASELINE_VS_BASE": "off"})
+    assert off.returncode == 0, off.stdout + off.stderr
+    assert "baseline-vs-base is `off`" in off.stdout
+
+
+def test_a_pull_request_that_leaves_the_baseline_alone_is_green(tmp_path):
+    """The other half of the pair: a head that changes code but not the
+    floor is compared, and passes - or the red above could be the
+    comparison failing everything.
+
+    Mutation: in baseline_growth, `elif n > was:` -> `elif n >= was:` and
+    seed the base with a banked entry - this goes red.
+    """
+    tree, sha = _git_repo(tmp_path / "repo")
+    (tree / "src" / "other.py").write_text("y = 2\n")
+    r = _pr_driver(tree, sha)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--base-baseline" in r.stdout  # the comparison really ran
+    assert "GREW" not in r.stdout
+
+
+def test_a_base_commit_that_cannot_be_had_is_could_not_run_never_a_pass(
+        tmp_path):
+    """A base commit the checkout lacks and cannot fetch (no remote here) is
+    a named could-not-run row, which fails the job under the default
+    `on-cannot-run: fail` - not a comparison silently dropped (2.9).
+
+    Mutation: append nothing to `results` when base_copy returns a reason -
+    exit 0, red.
+    """
+    tree, _ = _git_repo(tmp_path / "repo")
+    r = _pr_driver(tree, "0" * 40)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "could not be fetched" in r.stdout
+
+
+def test_outside_a_pull_request_the_summary_says_nothing_was_compared(
+        tmp_path):
+    """On a push there is no base; that is said, in the log and the summary,
+    so a green run there is not read as a comparison that passed.
+    """
+    r = _driver({"SUTRADHAR_PATHS": str(CLEAN.relative_to(REPO)),
+                 "GITHUB_EVENT_NAME": "push"}, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    summary = (tmp_path / "summary.md").read_text()
+    assert "not compared with a base branch" in summary
+    assert "not for a pull request" in summary
