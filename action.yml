@@ -94,6 +94,15 @@ inputs:
     description: Round records read by the opt-in `rounds` guard.
     required: false
     default: docs/rounds
+  baseline-vs-base:
+    description: >-
+      On a pull request, `check` (default) compares the swallow and
+      conflated-degrade baselines with the base branch's copies, and an
+      entry added or a count raised is a finding, so a change cannot bank
+      the defect it adds. `off` skips the comparison, for the one pull
+      request that adopts a baseline.
+    required: false
+    default: check
 
 runs:
   using: composite
@@ -112,4 +121,5 @@ runs:
         SUTRADHAR_DESIGN_DIR: ${{ inputs.design-dir }}
         SUTRADHAR_TESTS_DIR: ${{ inputs.tests-dir }}
         SUTRADHAR_ROUNDS_DIR: ${{ inputs.rounds-dir }}
+        SUTRADHAR_BASELINE_VS_BASE: ${{ inputs.baseline-vs-base }}
       run: python3 -I "${GITHUB_ACTION_PATH}/action/run_guards.py"

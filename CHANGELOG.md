@@ -8,6 +8,37 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**A pull request can no longer bank the defect it adds** (backflow B-64,
+doctrine 2.1; after Perplexity SPACE's architecture check, Apache-2.0).
+
+- `swallow_lint` and `conflated_degrade_lint` take `--base-baseline FILE`,
+  the base branch's copy of the baseline. An entry the current baseline adds,
+  or a count it raises, against that copy is a finding (exit 1). Lowered and
+  removed entries are silent. A base copy that is not a baseline is exit 2,
+  never an empty floor. `--base-baseline` with `--update-baseline` is
+  refused. Each selfcheck carries the pair.
+- The Action compares both baselines with the base branch's copies on every
+  pull request (new input `baseline-vs-base`, default `check`). It reads the
+  copy with `git cat-file` from the event's base commit, fetching it at depth
+  1 when the checkout lacks it. A base branch with no baseline counts as an
+  empty floor. A base commit it cannot get is a named could-not-run row. On
+  other events the step summary says nothing was compared. git is the only
+  program the driver starts besides an isolated python, and the R24-22
+  isolation ratchet now admits exactly `_python()` and `_git()`.
+- **Migration: the pull request that first adds a baseline goes red**,
+  because every entry in it is new against the base. Merge that one with
+  `baseline-vs-base: off`, or land the baseline before turning the Action on.
+  A tag pinned at v0.6.1 is unchanged.
+
+**A skipped test cannot read as green on CI** (backflow B-66, doctrine 2.9;
+after SPACE's fail-closed test dependencies).
+
+- `test_examples.py` skipped the whole demo when bash or the examples tree
+  was missing, and the suite read green. With `CI` set it now fails
+  collection and says why. Off CI it still skips, naming the reason.
+- `python/tests/test_skips_fail_closed_on_ci.py` is the class ratchet: any
+  test module that can skip must also read `CI` and fail there.
+
 **`detectors` finds helpers whose only caller is a test** (round 25,
 R25-1, doctrine 8.2).
 

@@ -52,6 +52,7 @@ findings too (R18-1, and see ``ratchet.py`` for the contract).
 Usage:
     python conflated_degrade_lint.py src/                    # gate
     python conflated_degrade_lint.py src/ --update-baseline  # record the floor
+    python conflated_degrade_lint.py src/ --base-baseline base.json  # no growth
     python conflated_degrade_lint.py --selfcheck             # prove it works
 
 Exit 0 at or below the floor, 1 a new conflation or an unbanked fix, 2 the
@@ -417,6 +418,30 @@ def _selfcheck_body() -> bool:
                 "<src>::read#2"]:
         problems.append(f"qualified keys are wrong: {keys}")
 
+    # B-64, in a pair: a key banked beyond the base branch's copy is a
+    # finding, and the same baseline against an equal copy passes; an
+    # unreadable base copy is could-not-run, never an empty floor. The
+    # baseline is written by the scan itself, so the scan agrees with it
+    # exactly and growth is the ONLY thing that can turn the first case red.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "bad.py").write_text(_BAD, encoding="utf-8")
+        cur, base = root / "cur.json", root / "base.json"
+        rc, said = cli([str(root), "--baseline", str(cur), "--update-baseline"])
+        banked = cur.read_text(encoding="utf-8") if cur.exists() else ""
+        if rc != 0 or "read_state" not in banked:
+            problems.append(f"the growth fixture's baseline was not written: "
+                            f"exit {rc}, {said!r}")
+        args = [str(root), "--baseline", str(cur), "--base-baseline", str(base)]
+        for base_text, want in (("[]", 1), (banked, 0), ("{}", 2)):
+            base.write_text(base_text, encoding="utf-8")
+            rc, said = cli(args)
+            grew = "GREW against the base" in said
+            if rc != want or grew != (want == 1):
+                problems.append(f"the scan's own baseline against base copy "
+                                f"{base_text.strip()[:40]!r} exited {rc} "
+                                f"(growth named: {grew}), not {want}: {said!r}")
+
     # R24-27, two pairs: a byte-order mark does not hide a finding (the BOM
     # twin finds what the plain twin finds), and a file that does not parse
     # is NOT (lambda p: find_conflated_degrades(read_source(p)))D - never the empty list a clean file returns.
@@ -453,6 +478,8 @@ def _selfcheck_body() -> bool:
             "inserted above them, new conflation reported, separated entry "
             "reported for banking, same-named defs keyed apart, a directory "
             "with no Python file refused with exit 2, one clean file passed, "
+            "a key banked beyond the base branch's copy flagged and an equal "
+            "copy silent, "
             "a file and its symlink read once and a link out of the scan "
             "skipped, a BOM-prefixed conflation found as the plain one is, "
             "an unparsable file not judged"
@@ -586,6 +613,25 @@ def _walk(paths: list, vendor=None) -> tuple:
     return named, walked, linked_dirs, unjudged, skipped_vendor
 
 
+def load_keys(path: Path) -> set:
+    """A conflation baseline: a list of keys. Raises ValueError saying why it
+    is not one, so a malformed file is "could not run", never an empty
+    floor."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path}: {type(exc).__name__}: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(k, str) for k in data):
+        raise ValueError(f"{path}: not a list of keys")
+    return set(data)
+
+
+def baseline_growth(current: set, base: set) -> list:
+    """Keys ``current`` banks that ``base``, the base branch's copy, does
+    not (B-64). Removed keys are the ratchet working and are not listed."""
+    return sorted(current - base)
+
+
 def _verdict(found: bool, unjudged: bool) -> int:
     """1 a finding, else 2 a file not judged, else 0 (R24-27). A finding is
     a verdict that holds whatever the unjudged files contain, and must not
@@ -672,12 +718,13 @@ def scan(paths: list, include_vendor: bool = False) -> tuple:
 
 
 _KNOWN_FLAGS = {
-    "--baseline", "--selfcheck", "--update-baseline", "--include-vendor",
-    "--help", "-h",
+    "--baseline", "--base-baseline", "--selfcheck", "--update-baseline",
+    "--include-vendor", "--help", "-h",
 }
 
 _HELP = (
     "usage: conflated_degrade_lint.py [PATH ...] [--baseline FILE]\n"
+    "                                 [--base-baseline FILE]\n"
     "                                 [--update-baseline] [--include-vendor]\n"
     "                                 [--selfcheck]\n"
 )
@@ -698,12 +745,19 @@ def main(argv: "list | None" = None) -> int:
     update = "--update-baseline" in argv
     include_vendor = "--include-vendor" in argv
     baseline_path = Path("conflated_degrade_baseline.json")
+    base_path = None
     paths: list = []
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a in ("--baseline", "--base-baseline") and i + 1 >= len(argv):
+            print(f"[conflated-degrade-lint] {a} needs a value",
+                  file=sys.stderr)
+            return 2
         if a == "--baseline":
             baseline_path = Path(argv[i + 1]); i += 2
+        elif a == "--base-baseline":
+            base_path = Path(argv[i + 1]); i += 2
         elif a.startswith("-"):
             # An unrecognised flag is refused, never ignored: a dropped
             # `--selfchek` would run the default and exit 0, which reads as
@@ -721,8 +775,28 @@ def main(argv: "list | None" = None) -> int:
               "scanned; name a directory or run --selfcheck", file=sys.stderr)
         return 2
 
+    if update and base_path is not None:
+        print("[conflated-degrade-lint] --base-baseline checks a baseline and "
+              "--update-baseline writes one; they are not combined.",
+              file=sys.stderr)
+        return 2
+
     if not selfcheck():
         return 1
+
+    # B-64: both baselines are read before the scan, so a base copy that
+    # cannot be read is could-not-run, not growth judged against nothing.
+    grown: list = []
+    if base_path is not None:
+        try:
+            base_keys = load_keys(base_path)
+            current = load_keys(baseline_path) if baseline_path.exists() else set()
+        except ValueError as exc:
+            print(f"[conflated-degrade-lint] cannot compare the baseline with "
+                  f"the base branch's copy: {exc}. Nothing was judged (2.9).",
+                  file=sys.stderr)
+            return 2
+        grown = baseline_growth(current, base_keys)
 
     found, files, skipped, outside, unjudged, linked_dirs = scan(
         paths, include_vendor)
@@ -795,7 +869,14 @@ def main(argv: "list | None" = None) -> int:
     not_judged = {_rel(f) for f, _ in unjudged}
     fixed = [k for k in fixed if k.split("::", 1)[0] not in not_judged]
 
-    code = _verdict(bool(new or fixed), bool(unjudged))
+    code = _verdict(bool(new or fixed or grown), bool(unjudged))
+    if grown:
+        print(f"\n[conflated-degrade-lint] the baseline GREW against the base "
+              f"branch's copy ({base_path}); a change cannot bank the "
+              f"conflation it adds (2.1, B-64):\n")
+        for k in grown:
+            print(f"  {k}: added")
+        print()
     if new:
         print(
             f"\n[conflated-degrade-lint] {len(new)} function(s) return the "
