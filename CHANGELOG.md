@@ -8,6 +8,24 @@ upgrade by diffing against the tag they took, and `bash bootstrap.sh --check
 
 ## Unreleased
 
+**The verifier no longer writes to the repository of the hook that runs it**
+(doctrine 2.2, 2.3; an adopter's pre-push hook, 2026-10-26).
+
+- `verify_guard --selfcheck`, run by a test suite from a pre-push hook in a
+  linked worktree, inherited the hook's `GIT_DIR`. `git -C <scratch>` does not
+  override it, so the fixture's `git init` set `core.bare = true` on the real
+  repository and its three commits landed on the branch being pushed, and the
+  selfcheck exited 0. Every subprocess `verify_guard` starts (git on the source
+  repo, the throwaway worktree and the fixture, and the guard command) now runs
+  with `git_env()`: this environment minus the variables `git rev-parse
+  --local-env-vars` lists. The corpus's verify adapter builds its fixture the
+  same way.
+- Guards: the selfcheck under `GIT_DIR` alone and under `GIT_DIR` +
+  `GIT_WORK_TREE` + `GIT_INDEX_FILE`, a real pre-push hook from a linked
+  worktree, an AST ratchet that every spawn in the verifier takes
+  `git_env()`, and a check that the list covers git's own. Reverting the fix
+  turns all of them red.
+
 **A pull request can no longer bank the defect it adds** (backflow B-64,
 doctrine 2.1; after Perplexity SPACE's architecture check, Apache-2.0).
 

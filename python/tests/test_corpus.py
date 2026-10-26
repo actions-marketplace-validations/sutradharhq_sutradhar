@@ -522,3 +522,46 @@ def test_ci_sweeps_every_guard_over_the_corpus():
             if line.strip().startswith("run:")]
     assert any("python/sutradhar_guards/corpus.py corpus/" in r
                and "--sweep-all" in r for r in runs), runs
+
+
+# ── the verify adapter's fixture, under a hook's GIT_DIR ────────────────────
+
+def test_verify_twin_under_a_hook_git_dir_leaves_that_repo_untouched(tmp_path, monkeypatch):
+    """A sweep started from a git hook inherits GIT_DIR, and the adapter's
+    `cwd=_TMP` does not override it: before the fix its `git init` and two
+    commits landed in the hook's repository (verify_guard's selfcheck did
+    the same to an adopter's repository on 2026-10-26)."""
+    import os
+    import subprocess
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    host = tmp_path / "host"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(host)], check=True,
+                   capture_output=True, env=clean)
+    subprocess.run(["git", "-C", str(host), "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+                    "commit", "-q", "--allow-empty", "-m", "host"],
+                   check=True, capture_output=True, env=clean)
+
+    def state():
+        def git(*args):
+            return subprocess.run(["git", f"--git-dir={host / '.git'}", *args],
+                                  capture_output=True, text=True, check=True,
+                                  env=clean).stdout
+        return (git("config", "--get", "core.bare"),
+                git("for-each-ref", "--format=%(refname) %(objectname)"),
+                (host / ".git" / "config").read_bytes())
+
+    cases = [c for c in corpus.load_cases(Path(corpus.__file__).resolve().parents[2] / "corpus")
+             if c.fixture == "two_commit"]
+    assert cases, "no two_commit case in the corpus: nothing below would run"
+    case = cases[0]
+    twin = tmp_path / "twin" / "defective"
+    corpus.materialize(case, twin, "defective")
+    before = state()
+    monkeypatch.setenv("GIT_DIR", str(host / ".git"))
+    spec = corpus.GUARDS[case.guard]
+    rc = corpus.run_twin(spec, twin, case.options, case.fixture)
+    monkeypatch.delenv("GIT_DIR")
+    assert state() == before
+    assert rc in spec.catch_codes + spec.clean_codes, (
+        f"the twin did not run to a verdict (exit {rc})")
