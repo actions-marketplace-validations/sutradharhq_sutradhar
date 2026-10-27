@@ -744,16 +744,19 @@ if len(twins) != 1:
     raise SystemExit(3)
 guard_rel = twins[0].relative_to(pathlib.Path(_TMP)).as_posix()
 
+# The guard's own scrubbed env: a sweep run from a git hook inherits its
+# GIT_DIR, and `cwd=_TMP` does not override it - the fixture would be built
+# in the hook's repository instead.
 def git(*args):
     subprocess.run(
         ["git", "-c", "user.name=sutradhar-corpus",
          "-c", "user.email=corpus@sutradhar.invalid",
          "-c", "commit.gpgsign=false", *args],
-        cwd=_TMP, capture_output=True, text=True, check=True)
+        cwd=_TMP, capture_output=True, text=True, check=True,
+        env=_guard.git_env())
 
 (root := pathlib.Path(_TMP)).joinpath("calc.py").write_text(_guard.FIXTURE_BUG)
-subprocess.run(["git", "init", "-q"], cwd=_TMP, check=True,
-               capture_output=True)
+git("init", "-q")
 git("add", "calc.py")
 git("commit", "-q", "-m", "buggy parent")
 (root / "calc.py").write_text(_guard.FIXTURE_FIX)
